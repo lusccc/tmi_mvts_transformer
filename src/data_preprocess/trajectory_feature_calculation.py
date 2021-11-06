@@ -1,0 +1,393 @@
+import argparse
+import multiprocessing
+import os
+import time
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from geopy.distance import geodesic
+from logzero import logger
+
+from utils import interp_single_seg, interp_trj_seg
+from utils import segment_single_series
+from utils import check_lat_lng, timestamp_to_hour, calc_initial_compass_bearing, \
+    to_categorical, get_consecutive_ones_range_indices
+
+""" 
+paper: `Unsupervised Deep Learning for GPS-Based Transportation Mode Identification` and 
+`Semi-Supervised Deep Learning Approach for Transportation Mode Identification Using GPS Trajectory Data`, 
+define stay time as 20min
+"""
+MAX_STAY_TIME_INTERVAL = 60 * 20
+MIN_N_POINTS = 10
+MAX_N_POINTS = 128
+# 0,    1,    2,   3,         4
+# walk, bike, bus, driving, train/subway,
+
+# limit for different modes:
+SPEED_LIMIT = {0: 7, 1: 12, 2: 120. / 3.6, 3: 180. / 3.6, 4: 120 / 3.6, }
+# acceleration
+ACC_LIMIT = {0: 3, 1: 3, 2: 2, 3: 10, 4: 3, }
+
+LIKELY_STOP_DISTANCE_THRESHOLD = 0.5  # meters
+LIKELY_TURN_ANGLE_THRESHOLD = 90  # degree
+MAX_MASK_SEG_LEN = 10
+
+
+def filter_error_gps_data(trjs, labels):
+    logger.info('filter_error_gps_data...')
+    tasks = []
+    batch_size = int(len(trjs) / n_threads + 1)
+    for i in range(0, n_threads):
+        tasks.append(pool.apply_async(do_filter_error_gps_data,
+                                      (trjs[i * batch_size:(i + 1) * batch_size],
+                                       labels[i * batch_size:(i + 1) * batch_size])))
+    res = np.array([[t.get()[0], t.get()[1]] for t in tasks], dtype=object)
+    trjs = np.concatenate(res[:, 0])
+    labels = np.concatenate(res[:, 1])
+    return trjs, labels
+
+
+def do_filter_error_gps_data(trjs, labels):
+    filtered_trjs = []
+    filter_labels = []
+    for trj, label in zip(trjs, labels):
+        n_points = len(trj)
+        if n_points < MIN_N_POINTS:
+            logger.info('gps points num not enough:{}'.format(n_points))
+            continue
+        invalid_points = []  # wrong gps data points index
+        for i in range(n_points - 1):
+            p_a = [trj[i][1], trj[i][2]]
+            p_b = [trj[i + 1][1], trj[i + 1][2]]
+            t_a = trj[i][0]
+            t_b = trj[i + 1][0]
+
+            # if "point a" is invalid, using previous "point a" instead of current one
+            if i in invalid_points:
+                p_a = [trj[i - 1][1], trj[i - 1][2]]
+                t_a = trj[i - 1][0]
+                delta_t = t_b - t_a
+            else:
+                delta_t = t_b - t_a
+
+            if delta_t <= 0:
+                invalid_points.append(i + 1)
+                logger.info('invalid timestamp, t_a:{}, t_b:{}, delta_t:{}'.format(t_a, t_b, delta_t))
+                continue
+            if not check_lat_lng(p_a):
+                invalid_points.append(i)
+                continue
+            if not check_lat_lng(p_b):
+                invalid_points.append(i + 1)
+                continue
+        filtered_trj_seg = np.delete(trj, invalid_points, axis=0)
+        if len(filtered_trj_seg) < MIN_N_POINTS:
+            logger.info('gps points num not enough:{}'.format(len(filtered_trj_seg)))
+            pass
+        else:
+            filtered_trjs.append(filtered_trj_seg)
+            filter_labels.append(label)
+    return np.array(filtered_trjs, dtype=object), np.array(filter_labels)
+
+
+def segment_on_long_stay_time(trjs, labels):
+    logger.info('segment_trjs...')
+    tasks = []
+    batch_size = int(len(trjs) / n_threads + 1)
+    for i in range(0, n_threads):
+        tasks.append(pool.apply_async(do_segment_on_long_stay_time, (
+            trjs[i * batch_size:(i + 1) * batch_size], labels[i * batch_size:(i + 1) * batch_size])))
+
+    res = np.array([[t.get()[0], t.get()[1]] for t in tasks], dtype=object)
+    trj_segs = np.concatenate(res[:, 0])
+    trj_seg_labels = np.concatenate(res[:, 1])
+    return trj_segs, trj_seg_labels
+
+
+def do_segment_on_long_stay_time(trjs, labels):
+    total_trj_segs = []
+    total_trj_seg_labels = []
+    for trj, label in zip(trjs, labels):
+        # first, split based on long stay points
+        delta_ts = np.diff(trj[:, 0])
+        split_idx = np.where(delta_ts > MAX_STAY_TIME_INTERVAL)
+        # note: the indices are saved in split_idx[0]
+        if len(split_idx[0]) > 0:
+            trj_segs = np.split(trj, split_idx[0] + 1)
+            trj_segs = [seg for seg in trj_segs if seg.shape[0] > 0]
+            trj_seg_labels = [label for _ in range(len(trj_segs))]
+        else:
+            trj_segs = [trj]
+            trj_seg_labels = [label]
+
+        # second, segment to sub_seg with max_size
+        for trj_seg, trj_seg_label in zip(trj_segs, trj_seg_labels):
+            trj_sub_segs = segment_single_series(trj_seg, max_size=MAX_N_POINTS, min_size=MIN_N_POINTS)
+            # if len(trj_sub_segs.shape)>1:
+            #     print()
+            trj_sub_seg_labels = [label for _ in range(len(trj_sub_segs))]
+            total_trj_segs.extend(trj_sub_segs)
+            total_trj_seg_labels.extend(trj_sub_seg_labels)
+    # total_trj_segs.extend(trj_segs)
+    # total_trj_seg_labels.extend(trj_seg_labels)
+    return np.array(total_trj_segs, dtype=object), np.array(total_trj_seg_labels, dtype=object)
+
+
+def calc_feature(trj_segs, trj_seg_labels):
+    """
+    noise means do not filter noise points
+    """
+    logger.info('calc_feature...')
+    tasks = []
+    batch_size = int(len(trj_segs) / n_threads + 1)
+    for i in range(0, n_threads):
+        tasks.append(pool.apply_async(do_calc_feature,
+                                      (trj_segs[i * batch_size:(i + 1) * batch_size],
+                                       trj_seg_labels[i * batch_size:(i + 1) * batch_size]
+                                       )))
+    res = np.array(
+        [[t.get()[0], t.get()[1], t.get()[2], t.get()[3], t.get()[4], t.get()[5], t.get()[6]] for t in tasks],
+        dtype=object)
+    logger.info('merging...')
+    ns_trj_segs = np.concatenate(res[:, 0])
+    cn_trj_segs = np.concatenate(res[:, 1])
+    ns_trj_seg_masks = np.concatenate(res[:, 2])
+    ns_multi_feature_segs = np.concatenate(res[:, 3])
+    cn_multi_feature_segs = np.concatenate(res[:, 4])
+    multi_feature_seg_labels = np.concatenate(res[:, 5])
+    n_removed_points = np.concatenate(res[:, 6])
+    return ns_trj_segs, cn_trj_segs, ns_trj_seg_masks, ns_multi_feature_segs, cn_multi_feature_segs, \
+           multi_feature_seg_labels, n_removed_points
+
+
+def do_calc_feature(trj_segs, trj_seg_labels):
+    # ns: noise, cn: clean, i.e., noise filtered
+    cn_trj_segs = []  # only keep lon and lat, which are interpolated to align the size of ns_trj_seg
+    ns_trj_segs = []  # only keep lon and lat
+    ns_trj_seg_masks = []  # mask for ns_trj_segs
+
+    ns_multi_feature_segs = []
+    cn_multi_feature_segs = []
+    multi_feature_seg_labels = []
+    n_removed_points = []
+
+    for i, (trj_seg, trj_seg_label) in enumerate(zip(trj_segs, trj_seg_labels)):
+        n_points = len(trj_seg)
+
+        # store noise filtered feature value, cn: clean
+        cn_hours = []  # hour of timestamp
+        cn_delta_times = []
+        cn_distances = []
+        cn_velocities = []
+        cn_accelerations = []  # init acceleration is 0
+        cn_headings = []
+        cn_heading_changes = []
+        cn_heading_change_rates = []
+
+        stop_states = []
+        turn_states = []
+
+        # store noise feature value, ns:noise
+        ns_hours = []  # hour of timestamp
+        ns_delta_times = []
+        ns_distances = []
+        ns_velocities = []
+        ns_accelerations = []  # init acceleration is 0
+        ns_headings = []
+        ns_heading_changes = []
+        ns_heading_change_rates = []
+
+        ns_indices = []
+
+        prev_v = 0  # previous velocity
+        prev_h = 0  # previous heading
+        for j in range(n_points - 1):
+            p_a = [trj_seg[j][1], trj_seg[j][2]]
+            p_b = [trj_seg[j + 1][1], trj_seg[j + 1][2]]
+            t_a = trj_seg[j][0]
+            t_b = trj_seg[j + 1][0]
+
+            # ************ 1.CALC FEATURE ************
+            delta_t = t_b - t_a
+            hour = timestamp_to_hour(t_a)
+            # distance
+            d = geodesic(p_a, p_b).meters
+            # velocity
+            v = d / delta_t
+            # accelerations
+            a = (v - prev_v) / delta_t
+            # heading
+            h = calc_initial_compass_bearing(p_a, p_b)
+            # heading change
+            hc = h - prev_h
+            # heading change rate
+            hcr = hc / delta_t
+            # is likely stop
+            stop = 1 if d < LIKELY_STOP_DISTANCE_THRESHOLD else 0
+            # is likely turn
+            turn = 0 if abs(hc) < LIKELY_TURN_ANGLE_THRESHOLD else 1
+
+            # ************ 2.SAVE CLEAN FEATURE ************
+            # feature value in valid range
+            if v <= SPEED_LIMIT[trj_seg_label] and abs(a) <= ACC_LIMIT[trj_seg_label]:
+                cn_delta_times.append(delta_t)
+                cn_hours.append(hour)
+                cn_distances.append(d)
+                cn_velocities.append(v)
+                cn_accelerations.append(a)
+                cn_headings.append(h)
+                cn_heading_changes.append(hc)
+                cn_heading_change_rates.append(hcr)
+
+                prev_v = v
+                prev_h = h
+            else:
+                ns_indices.append(j)
+
+            # ************ 3.SAVE NOISE FEATURE ************
+            # no matter if the value in valid range, we add all feature values into noise list
+            ns_delta_times.append(delta_t)
+            ns_hours.append(hour)
+            ns_distances.append(d)
+            ns_velocities.append(v)
+            ns_accelerations.append(a)
+            ns_headings.append(h)
+            ns_heading_changes.append(hc)
+            ns_heading_change_rates.append(hcr)
+            # since below two states used to generate mask for raw gps coordinate data,
+            # should be placed at noise feature
+            stop_states.append(stop)
+            turn_states.append(turn)
+
+        if len(cn_delta_times) < MIN_N_POINTS:
+            # logger.info('feature element num not enough:{}'.format(len(cn_delta_times)))
+            continue
+
+        n_removed_points.append(len(ns_indices))
+
+        # ************ 4.SAVE NOISE AND CLEAN FEATURE ************
+        """
+        since noise points were removed, the n_points could be small, may cause performance decrease.
+        here interp them to the size before noise removing
+        """
+        n_interp = n_points - 1
+        cn_multi_feature_seg = [interp_single_seg(cn_delta_times, n_interp),
+                                interp_single_seg(cn_hours, n_interp),
+                                interp_single_seg(cn_distances, n_interp),
+                                interp_single_seg(cn_velocities, n_interp),
+                                interp_single_seg(cn_accelerations, n_interp),
+                                interp_single_seg(cn_headings, n_interp),
+                                interp_single_seg(cn_heading_changes, n_interp),
+                                interp_single_seg(cn_heading_change_rates, n_interp)]
+
+        ns_multi_feature_seg = [ns_delta_times,
+                                ns_hours,
+                                ns_distances,
+                                ns_velocities,
+                                ns_accelerations,
+                                ns_headings,
+                                ns_heading_changes,
+                                ns_heading_change_rates]
+
+        ns_multi_feature_segs.append(ns_multi_feature_seg)
+        cn_multi_feature_segs.append(cn_multi_feature_seg)
+        multi_feature_seg_labels.append(trj_seg_label)
+
+        # ************ 5.GENERATE MASK ************
+        stop_seg_range = get_consecutive_ones_range_indices(stop_states, MAX_MASK_SEG_LEN)
+        turn_seg_range = get_consecutive_ones_range_indices(turn_states, MAX_MASK_SEG_LEN)
+
+        # 0s means mask, 1s means not affected
+        ns_trj_seg_mask = np.ones(n_points)
+        if len(stop_seg_range) > 0:
+            for s_range in stop_seg_range:
+                ns_trj_seg_mask[s_range[0]:s_range[1] + 1] = 0
+        if len(turn_seg_range) > 0:
+            for t_range in turn_seg_range:
+                ns_trj_seg_mask[t_range[0]:t_range[1] + 1] = 0
+        ns_trj_seg_masks.append(ns_trj_seg_mask)
+
+        # ************ 6.SAVE NOISE AND CLEAN TRAJECTORY ************
+        cn_trj_seg = interp_trj_seg(np.delete(trj_seg, ns_indices, axis=0), n_points)  # only keep lon, lat
+        ns_trj_seg = np.delete(trj_seg, 0, 1)
+        cn_trj_segs.append([cn_trj_seg[:, 0], cn_trj_seg[:, 1]])  # convert to list to avoid numpy broadcast error
+        ns_trj_segs.append([ns_trj_seg[:, 0], ns_trj_seg[:, 1]])
+
+    logger.info('* end a thread calc feature')
+    return \
+        np.array(ns_trj_segs, dtype=object), \
+        np.array(cn_trj_segs, dtype=object), \
+        np.array(ns_trj_seg_masks, dtype=object), \
+        np.array(ns_multi_feature_segs, dtype=object), \
+        np.array(cn_multi_feature_segs, dtype=object), \
+        np.array(multi_feature_seg_labels), \
+        n_removed_points
+
+
+# def standardization_df(df):
+#     """
+#     some of the code is borrow from: https://github.com/gzerveas/mvts_transformer
+#     :param df:  (n_sample, n_feature), each element is a seq_len series
+#     :return: normalized df of (n_sample*seq_len, n_feature)
+#     """
+#     lengths = df.applymap(lambda x: len(x)).values
+#     # what below did: make df of (n_sample, n_feature) to (n_sample*seq_len, n_feature), where seq_len has various
+#     # length for various sample. Then, assign rows belong to same sample with same ID. So that we can calc
+#     # standardization more easier.
+#     df = pd.concat((pd.DataFrame({col: df.loc[row, col] for col in df.columns}).reset_index(drop=True).set_index(
+#         pd.Series(lengths[row, 0] * [row])) for row in range(df.shape[0])), axis=0)
+#     mean = df.mean()
+#     std = df.std()
+#     return (df - mean) / (std + np.finfo(float).eps)
+
+
+if __name__ == '__main__':
+    t_start = time.time()
+
+    n_threads = multiprocessing.cpu_count()
+    pool = multiprocessing.Pool(processes=n_threads)
+    logger.info(f'n_thread:{n_threads}')
+
+    parser = argparse.ArgumentParser(description='TRJ_SEG_FEATURE')
+    parser.add_argument('--trjs_path', type=str, required=True)
+    parser.add_argument('--labels_path', type=str, required=True)
+    parser.add_argument('--n_class', type=int, default=5)  # use modes:2,4,6,5,7
+    parser.add_argument('--save_dir', type=str, required=True)
+    args = parser.parse_args()
+
+    # raw data
+    trjs = np.load(args.trjs_path, allow_pickle=True)
+    labels = np.load(args.labels_path, allow_pickle=True)
+
+    # preprocess
+    trjs, labels = filter_error_gps_data(trjs, labels)
+    trj_segs, trj_seg_labels = segment_on_long_stay_time(trjs, labels)
+    ns_trj_segs, \
+    cn_trj_segs, \
+    ns_trj_seg_masks, \
+    ns_multi_feature_segs, \
+    cn_multi_feature_segs, \
+    multi_feature_seg_labels, \
+    n_removed_points = calc_feature(trj_segs, trj_seg_labels)
+    logger.info('total n_points after segment_on_stay_point: {}'.format(np.sum([len(seg) for seg in trj_segs])))
+    logger.info(f'total n_points removed after calc_feature: {np.sum(n_removed_points)}')
+
+    # normalized_multi_feature_segs = standardization_df(pd.DataFrame(multi_feature_segs)) # normalization
+
+    # save result
+    logger.info(f'saving files to {args.save_dir}')
+    if not os.path.exists(args.save_dir):
+        os.makedirs(args.save_dir)
+    np.save(f'{args.save_dir}/noise_trj_segs.npy', ns_trj_segs)
+    np.save(f'{args.save_dir}/clean_trj_segs.npy', cn_trj_segs)
+    np.save(f'{args.save_dir}/noise_trj_seg_masks.npy', ns_trj_seg_masks)
+    np.save(f'{args.save_dir}/clean_multi_feature_segs.npy', cn_multi_feature_segs)
+    np.save(f'{args.save_dir}/clean_multi_feature_seg_labels.npy', multi_feature_seg_labels)
+    np.save(f'{args.save_dir}/noise_multi_feature_segs.npy', ns_multi_feature_segs)
+    np.save(f'{args.save_dir}/noise_multi_feature_seg_labels.npy', multi_feature_seg_labels)
+    # normalized_multi_feature_segs.to_pickle(f'{args.save_dir}/normalized_multi_feature_segs.pkl')
+    # np.save(f'{args.save_dir}/multi_feature_seg_labels.npy',
+    #         to_categorical(multi_feature_seg_labels, num_classes=args.n_class))  # labels to one-hot
+
+    logger.info('Running time: %s Seconds' % (time.time() - t_start))
