@@ -106,6 +106,7 @@ class FeatureData(object):
                             (self.clean_feature_df, 'standardization')]
 
     def load(self):
+        logger.info(f'{self.__class__.__name__} load() start')
         noise_multi_feature_segs_np = np.load(f'./data/{self.data_name}_features/noise_multi_feature_segs.npy',
                                               allow_pickle=True)
         noise_multi_feature_seg_labels_np = np.load(
@@ -131,6 +132,7 @@ class FeatureData(object):
         else:
             self.max_seq_len = lengths[0, 0]
 
+        logger.info(f'{self.__class__.__name__} pd.concat ...')
         # First create a (seq_len, feat_dim) dataframe for each sample, indexed by a single integer ("ID" of the sample)
         # Then concatenate into a (num_samples * seq_len, feat_dim) dataframe, with multiple rows corresponding to the
         # sample index (i.e. the same scheme as all datasets in this project)
@@ -155,6 +157,7 @@ class FeatureData(object):
             multi_feature_seg_labels = pd.DataFrame(labels.cat.codes,
                                                     dtype=np.int8)  # int8-32 gives an error when using nn.CrossEntropyLoss
 
+        logger.info(f'{self.__class__.__name__} load() end')
         return noise_df, clean_df, noise_multi_feature_seg_labels
 
 

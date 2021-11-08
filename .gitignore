@@ -1,8 +1,8 @@
 *.pyc
-outputs/*.png
-traj_img_generator/simulate_trajs_imgs/*.png
 logs/*
 .idea/
+data/
+experiments/
 *.npy
 *.npz
 *.zip
@@ -10,9 +10,4 @@ logs/*
 *.log
 *.model
 data/
-results/
-deep_clustering/logs
-DCEC/results/temp
 .ipynb_checkpoints
-run.ipynb
-/Gram/gram_imgs/

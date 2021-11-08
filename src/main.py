@@ -9,9 +9,11 @@ Proceedings of the 27th ACM SIGKDD Conference on Knowledge Discovery and Data Mi
 import logging
 
 # logging.basicConfig(format='%(asctime)s | %(levelname)s : %(message)s', level=logging.INFO)
+from torch.profiler import tensorboard_trace_handler
+
 logging.basicConfig(format='%(asctime)s,%(msecs)d %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s',
-    datefmt='%Y-%m-%d:%H:%M:%S',
-    level=logging.INFO)
+                    datefmt='%Y-%m-%d:%H:%M:%S',
+                    level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 logger.info("Loading packages ...")
@@ -221,6 +223,11 @@ def main(config):
                               num_workers=config['num_workers'],
                               pin_memory=True,
                               collate_fn=lambda x: collate_fn(x))
+    # *********** TRICKS **********
+    logger.info('data loader to list ...')
+    # note will be automatically shuffled due to it is DataLoader with  shuffle=True
+    val_loader = list(val_loader)
+    train_loader = list(train_loader)
 
     trainer = runner_class(model, train_loader, device, loss_module, optimizer, l2_reg=output_reg,
                            print_interval=config['print_interval'], console=config['console'])
@@ -228,6 +235,30 @@ def main(config):
                                  print_interval=config['print_interval'], console=config['console'])
 
     tensorboard_writer = SummaryWriter(config['tensorboard_dir'])
+
+
+    # dataloader time consumption test
+    if False:
+        with torch.profiler.profile(
+                schedule=torch.profiler.schedule(
+                    wait=2,
+                    warmup=2,
+                    active=6,
+                    repeat=1),
+                on_trace_ready=tensorboard_trace_handler('./'),
+                with_stack=True
+        ) as profiler:
+            t_sum = 0
+            last_time = time.time()
+            for i, data in enumerate(train_loader):
+                t = time.time()
+                t_diff = t - last_time
+                t_sum += t_diff
+                last_time = t
+                logger.info(f't_diff: {t_diff}')
+                profiler.step()
+            logger.info(f't_sum: {t_sum}')
+            exit(0)
 
     # *********** Train record ***********
     best_value = 1e16 if config[
@@ -243,6 +274,7 @@ def main(config):
 
     # *********** Start training ***********
     logger.info('Starting training...')
+
     for epoch in tqdm(range(start_epoch + 1, config["epochs"] + 1), desc='Training Epoch', leave=False):
         mark = epoch if config['save_all'] else 'last'
         epoch_start_time = time.time()
@@ -275,7 +307,8 @@ def main(config):
 
         # Learning rate scheduling
         if epoch == config['lr_step'][lr_step]:
-            utils.save_model(os.path.join(config['save_dir'], 'model_{}.pth'.format(epoch)), epoch, model, optimizer)
+            utils.save_model(os.path.join(config['save_dir'], 'model_{}.pth'.format(epoch)), epoch, model,
+                             optimizer)
             lr = lr * config['lr_factor'][lr_step]
             if lr_step < len(config['lr_step']) - 1:  # so that this index does not get out of bounds
                 lr_step += 1
@@ -287,6 +320,7 @@ def main(config):
         if config['harden'] and check_progress(epoch):
             train_loader.dataset.update()
             val_loader.dataset.update()
+
 
     # *********** Results ***********
     # Export evolution of metrics over epochs

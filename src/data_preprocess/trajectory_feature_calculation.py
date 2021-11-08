@@ -2,16 +2,20 @@ import argparse
 import multiprocessing
 import os
 import time
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from geopy.distance import geodesic
 from logzero import logger
-
 from utils import interp_single_seg, interp_trj_seg
 from utils import segment_single_series
 from utils import check_lat_lng, timestamp_to_hour, calc_initial_compass_bearing, \
     to_categorical, get_consecutive_ones_range_indices
+
+import matplotlib;
+
+matplotlib.use('Qt5Agg')
 
 """ 
 paper: `Unsupervised Deep Learning for GPS-Based Transportation Mode Identification` and 
@@ -45,7 +49,27 @@ def filter_error_gps_data(trjs, labels):
     res = np.array([[t.get()[0], t.get()[1]] for t in tasks], dtype=object)
     trjs = np.concatenate(res[:, 0])
     labels = np.concatenate(res[:, 1])
-    return trjs, labels
+
+    # filter out lat and lng whose values not in 1th ~ 99th percentile
+    trjs_stack = np.vstack(trjs)[:, [1, 2]]  # keep lat, lng
+    _99th = np.percentile(trjs_stack, 99, axis=0)
+    _1th = np.percentile(trjs_stack, 1, axis=0)
+    trjs_filtered = []
+    labels_filtered = []
+    deleted = []
+    for trj, label in zip(trjs, labels):
+        indices_lat = np.where((trj[:, 1] >= _99th[0]) | (trj[:, 1] <= _1th[0]))
+        indices_lon = np.where((trj[:, 2] >= _99th[1]) | (trj[:, 2] <= _1th[1]))
+        indices = np.intersect1d(indices_lat, indices_lon)
+        if len(indices) > 0:
+            # deleted.append(trj[[indices]])
+            logger.info(f'delete trj point not in 1th ~ 99th percentile: {trj[[indices]]}')
+        trj = np.delete(trj, indices, axis=0)
+        if len(trj) >= MIN_N_POINTS:
+            trjs_filtered.append(trj)
+            labels_filtered.append(label)
+
+    return np.array(trjs_filtered, dtype=object), np.array(labels_filtered, dtype=object)
 
 
 def do_filter_error_gps_data(trjs, labels):

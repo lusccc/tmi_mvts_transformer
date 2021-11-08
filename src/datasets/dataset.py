@@ -279,7 +279,7 @@ class SingleBranchClassificationDataset(Dataset):
         X_noise = self.noise_feature_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim) array
         y = self.labels_df.loc[self.IDs[ind]].values  # (num_labels,) array
 
-        return torch.from_numpy(X_noise), torch.from_numpy(y), self.IDs[ind]
+        return torch.from_numpy(X_noise), torch.from_numpy(y), torch.as_tensor(self.IDs[ind])
 
     def __len__(self):
         return len(self.IDs)
@@ -304,7 +304,7 @@ class DenoisingDataset(Dataset):
         X_noise = self.noise_feature_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim) array
         X_clean = self.clean_feature_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim) array
 
-        return torch.from_numpy(X_noise), torch.from_numpy(X_clean), self.IDs[ind]
+        return torch.from_numpy(X_noise), torch.from_numpy(X_clean), torch.as_tensor(self.IDs[ind])
 
     def __len__(self):
         return len(self.IDs)
@@ -332,7 +332,7 @@ class ImputationDataset(Dataset):
         X_noise = self.noise_feature_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim) array
         X_clean = self.clean_feature_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim) array
         mask = self.noise_mask_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim)
-        return torch.from_numpy(X_noise), torch.from_numpy(X_clean), torch.from_numpy(mask), self.IDs[ind]
+        return torch.from_numpy(X_noise), torch.from_numpy(X_clean), torch.from_numpy(mask), torch.as_tensor(self.IDs[ind])
 
     def update(self):
         print('!!!update')
@@ -353,7 +353,7 @@ class DualBranchClassificationDataset(Dataset):
         X1_noise = self.imputation_dataset.noise_feature_df.loc[self.IDs[ind]].values
         X2_noise = self.denoising_dataset.noise_feature_df.loc[self.IDs[ind]].values
         y = self.labels_df.loc[self.IDs[ind]].values  # (num_labels,) array
-        return torch.from_numpy(X1_noise), torch.from_numpy(X2_noise), torch.from_numpy(y), self.IDs[ind]
+        return torch.from_numpy(X1_noise), torch.from_numpy(X2_noise), torch.from_numpy(y), torch.as_tensor(self.IDs[ind])
 
     def __len__(self):
         return len(self.IDs)
