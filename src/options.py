@@ -55,7 +55,6 @@ class Options(object):
         self.parser.add_argument('--test_only', choices={'testset', 'fold_transduction'},
                                  help='If set, no training will take place; instead, trained model will be loaded and evaluated on test set')
         self.parser.add_argument('--data_name', type=str,
-                                 choices={'SHL', 'geolife'},
                                  )
         self.parser.add_argument('--data_class', type=str,
                                  choices={'feature', 'trajectory', 'trajectory_with_feature'},
@@ -88,8 +87,6 @@ class Options(object):
                                  help='Sub-sampling factor used for long sequences: keep every kth sample')
         # Training process
         self.parser.add_argument('--task',
-                                 choices={"denoising", "imputation", "denoising_branch_classification",
-                                          "imputation_branch_classification", "dual_branch_classification"},
                                  help=("Training objective/task: imputation of masked values,\n"
                                        "                          transduction of features to other features,\n"
                                        "                          classification of entire time series,\n"
@@ -168,10 +165,17 @@ class Options(object):
                                  help='Activation to be used in transformer encoder')
         self.parser.add_argument('--normalization_layer', choices={'BatchNorm', 'LayerNorm'}, default='BatchNorm',
                                  help='Normalization layer to be used internally in transformer encoder')
-        self.parser.add_argument('--imputation_model_hyperparams', type=str, default=None)
-        self.parser.add_argument('--denoising_model_hyperparams', type=str, default=None)
-        self.parser.add_argument('--load_imputation_branch', type=str, default=None)
-        self.parser.add_argument('--load_denoising_branch', type=str, default=None)
+        self.parser.add_argument('--trajectory_branch_hyperparams', type=str, default=None)
+        self.parser.add_argument('--feature_branch_hyperparams', type=str, default=None)
+        self.parser.add_argument('--load_trajectory_branch', type=str, default=None)
+        self.parser.add_argument('--load_feature_branch', type=str, default=None)
+        self.parser.add_argument('--input_type',  choices={"mix", "clean", "noise"}, default='mix')
+        self.parser.add_argument('--disable_mask', action='store_true',)
+        '''
+        0        1     2         3         4             5     6        7               8 
+        delta_t, hour, distance, velocity, acceleration, jerk, heading, heading_change, heading_change_rate
+        '''
+        self.parser.add_argument('--motion_features', type=str, default='3,4,5,8')
 
     def parse(self):
 
@@ -192,4 +196,5 @@ class Options(object):
             args.val_ratio = 0
             args.test_ratio = 0
 
+        args.motion_features = [int(item) for item in args.motion_features.split(',')]
         return args

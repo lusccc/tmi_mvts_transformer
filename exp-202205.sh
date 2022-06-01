@@ -1,0 +1,86 @@
+#####
+#SHL 7 class
+#####
+python src/main.py --output_dir experiments --comment "pretraining through trj_imputation" --name SHL_7_trj_pretrained --task denoising_imputation --records_file Denoising_imputation_records.xls --data_class trajectory --data_name SHL_7 --val_ratio 0.1 --test_ratio 0.2 --epochs 100 --lr 0.001 --optimizer RAdam --batch_size 650 --pos_encoding learnable --num_workers 16 --d_model 64  --num_heads 8 --num_layers 4 --dim_feedforward 256  --input_type mix
+
+python src/main.py --output_dir experiments --comment "pretraining through feat_denoising_imputation" --name SHL_feature_pretrained --task denoising_imputation --records_file Denoising_imputation_records.xls --data_class feature --data_name SHL_7 --val_ratio 0.1 --test_ratio 0.2 --epochs 100 --lr 0.001 --optimizer RAdam --batch_size 650 --pos_encoding learnable --d_model 64 --num_workers 16 --num_heads 8 --num_layers 4 --dim_feedforward 256  --input_type mix
+
+python src/main.py --output_dir experiments --comment "finetune for classification" --name SHL_7_dual_branch_finetune --task dual_branch_classification --records_file Classification_records.xls --data_class trajectory_with_feature --data_name SHL_7 --val_ratio 0.1 --test_ratio 0.2 --epochs 100 --lr 0.001 --optimizer RAdam --batch_size 450 --pos_encoding learnable --num_workers 16  --input_type mix --change_output --key_metric accuracy --denoising_model_hyperparams experiments/tmp/feature_model_hyperparams.json --imputation_model_hyperparams experiments/tmp/trajectory_model_hyperparams.json --load_denoising_branch experiments/tmp/feature_model_best.pth --load_imputation_branch experiments/tmp/trajectory_model_best.pth
+
+#####
+#GEOLIFE pipline
+#####
+python src/main.py --output_dir experiments --comment "pretraining through trj_imputation" --name geolife_trj_pretrained --task denoising_imputation --records_file Denoising_imputation_records.xls --data_class trajectory --data_name geolife --val_ratio 0.1 --test_ratio 0.2 --epochs 300 --lr 0.001 --optimizer RAdam --batch_size 520 --pos_encoding learnable --num_workers 16 --d_model 64  --num_heads 8 --num_layers 4 --dim_feedforward 256 --input_type mix
+
+python src/main.py --output_dir experiments --comment "pretraining through feat_denoising_imputation" --name geolife_feature_pretrained --task denoising_imputation --records_file Denoising_imputation_records.xls --data_class feature --data_name geolife --val_ratio 0.1 --test_ratio 0.2 --epochs 300 --lr 0.001 --optimizer RAdam --batch_size 520 --pos_encoding learnable --d_model 64 --num_workers 16 --num_heads 8 --num_layers 4 --dim_feedforward 256 --input_type mix
+
+python src/main.py --output_dir experiments --comment "finetune for classification" --name geolife_dual_branch_finetune --task dual_branch_classification --records_file Classification_records.xls --data_class trajectory_with_feature --data_name geolife --val_ratio 0.1 --test_ratio 0.2 --epochs 40 --lr 0.001 --optimizer RAdam --batch_size 420 --pos_encoding learnable --num_workers 16 --input_type mix --change_output --key_metric accuracy --denoising_model_hyperparams experiments/tmp/feature_model_hyperparams.json --imputation_model_hyperparams experiments/tmp/trajectory_model_hyperparams.json --load_denoising_branch experiments/tmp/feature_model_best.pth --load_imputation_branch experiments/tmp/trajectory_model_best.pth
+#test
+python src/main.py --output_dir experiments --comment "finetune for classification" --name geolife_dual_branch_finetune --task dual_branch_classification --records_file Classification_records.xls --data_class trajectory_with_feature --data_name geolife --val_ratio 0.1 --test_ratio 0.2 --epochs 200 --lr 0.001 --optimizer RAdam --batch_size 250 --pos_encoding learnable --num_workers 16 --key_metric accuracy --denoising_model_hyperparams experiments/tmp/feature_model_hyperparams.json --imputation_model_hyperparams experiments/tmp/trajectory_model_hyperparams.json --load_model experiments/geolife_dual_branch_finetune_2022-05-05_11-38-54_Thf/checkpoints/model_best.pth  --input_type clean --test_only testset
+#####
+#GEOLIFE
+#####
+python src/main.py --output_dir experiments --comment "pretraining through trj_imputation" --name geolife_trj_pretrained --task denoising_imputation --records_file Denoising_imputation_records.xls --data_class trajectory --data_name geolife --val_ratio 0.1 --test_ratio 0.2 --epochs 150 --lr 0.001 --optimizer RAdam --batch_size 520 --pos_encoding learnable --num_workers 16 --d_model 64  --num_heads 8 --num_layers 4 --dim_feedforward 256 --input_type mix
+
+python src/main.py --output_dir experiments --comment "pretraining through feat_denoising_imputation" --name geolife_feature_pretrained --task denoising_imputation --records_file Denoising_imputation_records.xls --data_class feature --data_name geolife --val_ratio 0.1 --test_ratio 0.2 --epochs 200 --lr 0.001 --optimizer RAdam --batch_size 520 --pos_encoding learnable --d_model 64 --num_workers 16 --num_heads 8 --num_layers 4 --dim_feedforward 256 --input_type mix
+
+python src/main.py --output_dir experiments --comment "finetune for classification" --name geolife_dual_branch_finetune --task dual_branch_classification --records_file Classification_records.xls --data_class trajectory_with_feature --data_name geolife --val_ratio 0.1 --test_ratio 0.2 --epochs 40 --lr 0.001 --optimizer RAdam --batch_size 420 --pos_encoding learnable --num_workers 16 --input_type mix --change_output --key_metric accuracy --denoising_model_hyperparams experiments/geolife_feature_pretrained_2022-05-04_00-17-11_Qrb/denoising_imputation_model_hyperparams.json --imputation_model_hyperparams experiments/geolife_trj_pretrained_2022-05-03_11-30-18_KYo/denoising_imputation_model_hyperparams.json --load_denoising_branch experiments/geolife_feature_pretrained_2022-05-04_00-17-11_Qrb/checkpoints/model_best.pth --load_imputation_branch experiments/geolife_trj_pretrained_2022-05-03_11-30-18_KYo/checkpoints/model_best.pth
+
+#test
+python src/main.py --output_dir experiments --comment "finetune for classification" --name geolife_dual_branch_finetune --task dual_branch_classification --records_file Classification_records.xls --data_class trajectory_with_feature --data_name geolife --val_ratio 0.1 --test_ratio 0.2 --epochs 200 --lr 0.001 --optimizer RAdam --batch_size 250 --pos_encoding learnable --num_workers 16 --key_metric accuracy --denoising_model_hyperparams experiments/geolife_feature_pretrained_2022-05-04_00-17-11_Qrb/denoising_imputation_model_hyperparams.json --imputation_model_hyperparams experiments/geolife_trj_pretrained_2022-05-03_11-30-18_KYo/denoising_imputation_model_hyperparams.json --load_model experiments/geolife_dual_branch_finetune_2022-05-04_18-54-48_6FL/checkpoints/model_best.pth  --input_type noise --test_only testset
+
+############
+#!!!!! geolife sub gelu
+############
+python src/main.py --output_dir experiments --comment "pretraining through trj_imputation" --name geolife_sub_trj_pretrained --task denoising_imputation --records_file Denoising_imputation_records.xls --data_class trajectory --data_name geolife_sub --val_ratio 0.1 --test_ratio 0.2 --epochs 100 --lr 0.001 --optimizer RAdam --batch_size 830 --pos_encoding learnable --num_workers 16 --d_model 64  --num_heads 8 --num_layers 4 --dim_feedforward 256 --input_type mix
+
+python src/main.py --output_dir experiments --comment "pretraining through feat_denoising_imputation" --name geolife_sub_feature_pretrained --task denoising_imputation --records_file Denoising_imputation_records.xls --data_class feature --data_name geolife_sub --val_ratio 0.1 --test_ratio 0.2 --epochs 100 --lr 0.001 --optimizer RAdam --batch_size 850 --pos_encoding learnable --d_model 64 --num_workers 16 --num_heads 8 --num_layers 4 --dim_feedforward 256 --input_type mix
+#fine tune
+python src/main.py --output_dir experiments --comment "finetune for classification" --name geolife_sub_dual_branch_finetune --task dual_branch_classification --records_file Classification_records.xls --data_class trajectory_with_feature --data_name geolife_sub --val_ratio 0.1 --test_ratio 0.2 --epochs 300 --lr 0.001 --optimizer RAdam --batch_size 400 --pos_encoding learnable --num_workers 16 --input_type mix --change_output --key_metric accuracy --denoising_model_hyperparams experiments/geolife_sub_feature_pretrained_2022-05-04_15-26-58_GYL/denoising_imputation_model_hyperparams.json --imputation_model_hyperparams experiments/geolife_sub_trj_pretrained_2022-05-04_15-16-32_sWE/denoising_imputation_model_hyperparams.json --load_denoising_branch experiments/geolife_sub_feature_pretrained_2022-05-04_15-26-58_GYL/checkpoints/model_best.pth --load_imputation_branch experiments/geolife_sub_trj_pretrained_2022-05-04_15-16-32_sWE/checkpoints/model_best.pth
+
+#test
+python src/main.py --output_dir experiments --comment "finetune for classification" --name geolife_sub_dual_branch_finetune --task dual_branch_classification --records_file Classification_records.xls --data_class trajectory_with_feature --data_name geolife_sub --val_ratio 0.1 --test_ratio 0.2 --epochs 200 --lr 0.001 --optimizer RAdam --batch_size 100 --pos_encoding learnable --num_workers 16 --key_metric accuracy --denoising_model_hyperparams experiments/geolife_sub_feature_pretrained_2022-05-04_15-26-58_GYL/denoising_imputation_model_hyperparams.json --imputation_model_hyperparams experiments/geolife_sub_trj_pretrained_2022-05-04_15-16-32_sWE/denoising_imputation_model_hyperparams.json --load_model experiments/geolife_sub_dual_branch_finetune_2022-05-04_19-52-48_poZ/checkpoints/model_best.pth  --input_type clean --test_only testset
+
+
+######
+#-----SHL gelu exp
+######
+python src/main.py --output_dir experiments --comment "finetune for classification" --name SHL_dual_branch_finetune --task dual_branch_classification --records_file Classification_records.xls --data_class trajectory_with_feature --data_name SHL --val_ratio 0.1 --test_ratio 0.2 --epochs 250 --lr 0.001 --optimizer RAdam --batch_size 450 --pos_encoding learnable --num_workers 16 --input_type mix --change_output --key_metric accuracy --denoising_model_hyperparams experiments/SHL_feature_pretrained_2021-12-10_20-25-16_zXg/denoising_imputation_model_hyperparams.json --imputation_model_hyperparams experiments/SHL_trj_pretrained_2021-12-06_21-51-57_vkv/imputation_model_hyperparams.json --load_denoising_branch experiments/SHL_feature_pretrained_2021-12-10_20-25-16_zXg/checkpoints/model_best.pth --load_imputation_branch experiments/SHL_trj_pretrained_2021-12-06_21-51-57_vkv/checkpoints/model_best.pth
+
+#test
+python src/main.py --output_dir experiments --comment "finetune for classification" --name SHL_dual_branch_finetune --task dual_branch_classification --records_file Classification_records.xls --data_class trajectory_with_feature --data_name SHL --val_ratio 0.1 --test_ratio 0.2 --epochs 45 --lr 0.001 --optimizer RAdam --batch_size 300 --pos_encoding learnable --num_workers 16 --key_metric accuracy --denoising_model_hyperparams experiments/SHL_feature_pretrained_2021-12-10_20-25-16_zXg/denoising_imputation_model_hyperparams.json --imputation_model_hyperparams experiments/SHL_trj_pretrained_2021-12-06_21-51-57_vkv/imputation_model_hyperparams.json --load_model experiments/SHL_dual_branch_finetune_2022-05-04_18-28-13_M7s/checkpoints/model_best.pth  --input_type clean --test_only testset
+
+
+######
+#cnn, mix train or clean train
+######
+python src/main.py --output_dir experiments --comment "cnn no mix comparative exp" --name geolife_cnn_no_mix_comparative_exp --task cnn_classification_no_mix --records_file cnn_records.xls --data_class feature --data_name geolife --val_ratio 0.1 --test_ratio 0.2 --epochs 150 --lr 0.001 --optimizer RAdam --batch_size 20000  --num_workers 16 --activation relu --input_type mix
+#-test
+python src/main.py --output_dir experiments --comment "cnn no mix comparative exp" --name geolife_cnn_no_mix_comparative_exp --records_file cnn_records.xls  --data_class feature --data_name geolife --val_ratio 0.1 --test_ratio 0.2 --batch_size 20000 --task cnn_classification_no_mix  --key_metric accuracy  --num_workers 16 --load_model experiments/geolife_cnn_no_mix_comparative_exp_2022-05-05_14-24-45_ORG/checkpoints/model_best.pth  --test_only testset --input_type noise
+
+######
+#lstm, mix train or clean train
+######
+
+python src/main.py --output_dir experiments --comment "cnn no mix comparative exp" --name geolife_cnn_no_mix_comparative_exp --task cnn_classification_no_mix --records_file cnn_records.xls --data_class feature --data_name geolife --val_ratio 0.1 --test_ratio 0.2 --epochs 150 --lr 0.001 --optimizer RAdam --batch_size 20000  --num_workers 16 --activation relu --input_type mix
+
+python src/main.py --output_dir experiments --comment "lstm comparative exp" --name SHL_lstm_comparative_exp --task lstm_classification --records_file lstm_records.xls --data_class feature --data_name SHL --val_ratio 0.1 --test_ratio 0.2 --epochs 65 --lr 0.001 --optimizer RAdam --batch_size 900  --num_workers 16 --activation relu --input_type mix
+
+#geolife
+python src/main.py --output_dir experiments --comment "lstm comparative exp" --name geolife_lstm_comparative_exp --task lstm_classification --records_file lstm_records.xls --data_class feature --data_name geolife --val_ratio 0.1 --test_ratio 0.2 --epochs 40 --lr 0.001 --optimizer RAdam --batch_size 780  --num_workers 16 --activation relu --input_type clean --load_model experiments/geolife_lstm_comparative_exp_2022-05-06_20-51-56_yai/checkpoints/model_last.pth
+#-test
+python src/main.py --output_dir experiments --comment "lstm comparative exp" --name SHL_lstm_comparative_exp --task lstm_classification --records_file lstm_records.xls --data_class feature --data_name SHL --val_ratio 0.1 --test_ratio 0.2 --epochs 150 --lr 0.001 --optimizer RAdam --batch_size 600  --num_workers 16 --activation relu --load_model experiments/SHL_lstm_comparative_exp_2022-05-06_13-21-59_7eQ/checkpoints/model_best.pth  --test_only testset --input_type noise
+
+python src/main.py --output_dir experiments --comment "lstm comparative exp" --name geolife_lstm_comparative_exp --task lstm_classification --records_file lstm_records.xls --data_class feature --data_name geolife --val_ratio 0.1 --test_ratio 0.2 --epochs 150 --lr 0.001 --optimizer RAdam --batch_size 600  --num_workers 16 --activation relu --load_model experiments/geolife_lstm_comparative_exp_2022-05-06_21-19-20_fhC/checkpoints/model_best.pth  --test_only testset --input_type noise
+
+
+######
+#-----SHL freeze exp
+######
+python src/main.py --output_dir experiments --comment "pretraining through trj_imputation" --name SHL_trj_pretrained --task denoising_imputation --records_file Denoising_imputation_records.xls --data_class trajectory --data_name SHL --val_ratio 0.1 --test_ratio 0.2 --epochs 150 --lr 0.001 --optimizer RAdam --batch_size 480 --pos_encoding learnable --num_workers 16 --d_model 64  --num_heads 8 --num_layers 4 --dim_feedforward 256 --input_type mix
+
+python src/main.py --output_dir experiments --comment "pretraining through feat_denoising_imputation" --name SHL_feature_pretrained --task denoising_imputation --records_file Denoising_imputation_records.xls --data_class feature --data_name SHL --val_ratio 0.1 --test_ratio 0.2 --epochs 200 --lr 0.001 --optimizer RAdam --batch_size 250 --pos_encoding learnable --d_model 64 --num_workers 16 --num_heads 8 --num_layers 4 --dim_feedforward 256 --input_type mix
+
+python src/main.py --output_dir experiments --comment "finetune for classification" --name SHL_dual_branch_finetune --task dual_branch_classification --records_file Classification_records.xls --data_class trajectory_with_feature --data_name SHL --val_ratio 0.1 --test_ratio 0.2 --epochs 200 --lr 0.001 --optimizer RAdam --batch_size 300 --pos_encoding learnable --num_workers 16 --input_type mix --change_output --key_metric accuracy --denoising_model_hyperparams experiments/SHL_feature_pretrained_2022-05-03_22-07-41_dn0/denoising_imputation_model_hyperparams.json --imputation_model_hyperparams experiments/SHL_trj_pretrained_2022-05-03_22-06-21_l3p/denoising_imputation_model_hyperparams.json --load_denoising_branch experiments/SHL_feature_pretrained_2022-05-03_22-07-41_dn0/checkpoints/model_best.pth --load_imputation_branch experiments/SHL_trj_pretrained_2022-05-03_22-06-21_l3p/checkpoints/model_best.pth
+
+python src/main.py --output_dir experiments --comment "finetune for classification" --name SHL_dual_branch_finetune --task dual_branch_classification --records_file Classification_records.xls --data_class trajectory_with_feature --data_name SHL --val_ratio 0.1 --test_ratio 0.2 --epochs 200 --lr 0.001 --optimizer RAdam --batch_size 740 --pos_encoding learnable --num_workers 8 --input_type mix --change_output --key_metric accuracy --denoising_model_hyperparams experiments/SHL_feature_pretrained_2022-05-03_22-07-41_dn0/denoising_imputation_model_hyperparams.json --imputation_model_hyperparams experiments/SHL_trj_pretrained_2022-05-03_22-06-21_l3p/denoising_imputation_model_hyperparams.json --load_denoising_branch experiments/SHL_feature_pretrained_2022-05-03_22-07-41_dn0/checkpoints/model_best.pth --load_imputation_branch experiments/SHL_trj_pretrained_2022-05-03_22-06-21_l3p/checkpoints/model_best.pth --freeze

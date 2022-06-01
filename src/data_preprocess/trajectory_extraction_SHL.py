@@ -21,24 +21,33 @@ def process_labels(labels_file_path, locations_file_path):
     gps_records.columns = ['timestamp', 'lat', 'lon']
     gps_records['timestamp'] = gps_records['timestamp'].apply(lambda x: x / 1000.)
 
+    """
+    SHL label:
+    Null=0, Still=1, Walking=2, Run=3, Bike=4, Car=5, Bus=6, Train=7, Subway=8
+    
+    Geolife label:
+    modes: {'walk': 0, 'bike': 1, 'bus': 2, 'car': 3, 'subway': 4, 'train': 4, 'airplane': 6, 'boat': 7, 'run': 8, 'motorcycle': 9, 'taxi': 3}
+    modes to use: [0, 1, 2, 3, 4]
+    """
+
     for idx, label_detail in labels_time_range.iterrows():
         label = label_detail['label']
         if label not in use_modes:
             continue
-
-        ' !!!!make the label index of modes SAME as geolife!!!!'
-        if label == 2:
-            label = 0
-        # if label == 3:
-        #     label = 0
-        if label == 4:
-            label = 1
-        if label == 5:
-            label = 3
-        if label == 6:
-            label = 2
-        if label == 7 or label == 8:  # merge train&subway
-            label = 4
+        if len(use_modes) == 5:
+            ' !!!!make the label index of modes SAME as geolife!!!! geolife use 5 classification'
+            if label == 2:
+                label = 0
+            # if label == 3:
+            #     label = 0
+            if label == 4:
+                label = 1
+            if label == 5:
+                label = 3
+            if label == 6:
+                label = 2
+            if label == 7 or label == 8:  # merge train&subway
+                label = 4
         st = label_detail['timestamp'][0]
         et = label_detail['timestamp'][-1]
         trj = gps_records[(gps_records['timestamp'] >= st) & (gps_records['timestamp'] <= et)]
@@ -91,3 +100,5 @@ if __name__ == '__main__':
 
     np.save(f'{args.save_dir}trjs.npy', trjs)
     np.save(f'{args.save_dir}labels.npy', labels)
+
+    #  --use_modes "1,2,3,4,6,5,7" --data_dir /mnt/e/DATASET/SHLDataset_User1Hips_v1/release/User1 --save_dir ./data/SHL_7_extracted/

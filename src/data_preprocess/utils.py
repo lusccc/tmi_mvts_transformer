@@ -1,9 +1,13 @@
 import math
 import os
+import warnings
 
 import matplotlib
 import numpy as np
+import pandas as pd
 import sklearn
+from kats.consts import TimeSeriesData
+from kats.detectors.bocpd import BOCPDetector, BOCPDModelType, NormalKnownParameters
 from scipy.optimize import linear_sum_assignment
 
 matplotlib.use('Agg')
@@ -16,7 +20,8 @@ import tables as tb
 import time
 from datetime import datetime
 from sklearn.preprocessing import StandardScaler, LabelEncoder
-
+from logzero import logger
+import ruptures as rpt
 
 def scale_any_shape_data(data, scaler):
     data = np.array(data)
@@ -284,14 +289,96 @@ def one_runs(a):
     return ranges
 
 
-def get_consecutive_ones_range_indices(a, max_continuous_len):
+def get_consecutive_ones_range_indices(a, min_continuous_len):
     """
-     find consecutive 1s seg, where len(seg) >  max_continuous_len
+     find consecutive 1s seg, where len(seg) >  min_continuous_len
     """
     result = []
     seg_range_indices = one_runs(a)
     seg_len = np.diff(seg_range_indices, axis=1)
     for i, l in enumerate(seg_len):
-        if l[0] > max_continuous_len:
+        if l[0] > min_continuous_len:
             result.append(seg_range_indices[i])
     return result
+
+
+time_convert = np.vectorize(lambda x: datetime.fromtimestamp(x))
+def generate_mask_using_CPD(seg, mask_ratio=.15, mean_mask_length=3):
+    n_points = len(seg)
+    n_mask = round(n_points * mask_ratio)
+    n_expected_change_point = int(n_mask / mean_mask_length)
+
+    # change point detection
+    model = "rbf"  # "l2", "l1"
+    algo = rpt.Dynp(model=model, min_size=3, jump=2).fit(seg)
+    change_points = algo.predict(n_bkps=n_expected_change_point)
+    # rpt.show.display(seg, change_points, [2,5,6,9,10,34,55], figsize=(10, 6))
+    # plt.show()
+
+    # 0s means mask, 1s means not affected
+    mask_vec = np.ones(n_points)
+    for cp in change_points:
+        # logger.info(cp)
+        # check beginning
+        if int(cp - int(mean_mask_length / 2)) <= 0:
+            mask_vec[:mean_mask_length] = 0
+        # check end
+        elif int(cp + int(mean_mask_length / 2)) >= n_points:
+            mask_vec[-mean_mask_length:] = 0
+        else:
+            mask_vec[cp - int(mean_mask_length / 2):cp - int(mean_mask_length / 2) + mean_mask_length] = 0
+
+    return mask_vec
+
+# https://github.com/facebook/Ax/issues/417#issuecomment-718002390
+# to make BOCPDetector warning disappear
+warnings.filterwarnings("ignore", category=UserWarning)
+# time_convert = np.vectorize(lambda x: datetime.fromtimestamp(x))
+def get_mask_with_BOCPDetector(time_seg, feature_seg, mask_ratio=.15, mean_mask_length=3):
+    """
+    deprecated!!!!!
+    change point detection, then, generate mask
+    """
+    n_points = len(feature_seg)
+    n_mask = int(n_points * mask_ratio)
+    n_expected_change_point = int(n_mask / mean_mask_length)
+    ts_df = pd.DataFrame({'time': time_convert(time_seg), 'y': feature_seg})
+    ts = TimeSeriesData(ts_df)
+    detector = BOCPDetector(ts) # https://github.com/facebookresearch/Kats/blob/main/tutorials/kats_202_detection.ipynb
+
+    min_threshold = .11
+    lr = .1
+    curr_threshold = .5
+    change_points = []
+    n_change_point = 0
+    while curr_threshold > min_threshold and n_change_point < n_expected_change_point:
+        # logger.info(f'curr_threshold:{curr_threshold}')
+        change_points = detector.detector(
+            model=BOCPDModelType.NORMAL_KNOWN_MODEL, changepoint_prior=mask_ratio, threshold=curr_threshold,
+            model_parameters=NormalKnownParameters(empirical=False,)
+        )
+
+        curr_threshold -= lr
+        # logger.info(f'n_change_point:{len(change_points)}')
+    n_change_point = len(change_points)
+    if n_change_point < n_expected_change_point:
+        logger.warn(f'n_change_point:{n_change_point} not meet n_expected_change_point:{n_expected_change_point}')
+
+    # 0s means mask, 1s means not affected
+    mask_vec = np.ones(n_points)
+    for cp in change_points:
+        cp = ts_df.index[ts_df['time'] == cp.start_time].tolist()
+        assert len(cp) == 1
+        cp_idx = cp[0]
+        # logger.info(cp_idx)
+        # check beginning
+        if int(cp_idx - int(mean_mask_length / 2)) <= 0:
+            mask_vec[:mean_mask_length] = 0 # assign mask at beginning
+        # check end
+        elif int(cp_idx + int(mean_mask_length / 2)) >= n_points:
+            mask_vec[-mean_mask_length:] = 0 #  assign mask at end
+        else:
+            mask_vec[cp_idx - int(mean_mask_length / 2):cp_idx - int(mean_mask_length / 2) + mean_mask_length] = 0
+
+    return mask_vec
+

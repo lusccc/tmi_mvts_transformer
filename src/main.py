@@ -6,17 +6,11 @@ George Zerveas et al. A Transformer-based Framework for Multivariate Time Series
 Proceedings of the 27th ACM SIGKDD Conference on Knowledge Discovery and Data Mining (KDD '21), August 14--18, 2021
 """
 
-import logging
-
-# logging.basicConfig(format='%(asctime)s | %(levelname)s : %(message)s', level=logging.INFO)
+import logzero
+import numpy as np
+from logzero import logger
+from torch.backends import cudnn
 from torch.profiler import tensorboard_trace_handler
-
-logging.basicConfig(format='%(asctime)s,%(msecs)d %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s',
-                    datefmt='%Y-%m-%d:%H:%M:%S',
-                    level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-logger.info("Loading packages ...")
 import os
 import sys
 import time
@@ -26,18 +20,26 @@ import json
 # 3rd party packages
 from tqdm import tqdm
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.utils.tensorboard import SummaryWriter
 
 # Project modules
+from datasets import dataset
 from options import Options
 from running import setup, pipeline_factory, validate, check_progress, NEG_METRICS
 from utils import utils
 from datasets.data import data_factory, Normalizer
 from datasets.datasplit import split_dataset
-from models.ts_transformer import model_factory
+from models.models import model_factory
 from models.loss import get_loss_module
 from optimizers import get_optimizer
+
+# to address Too many open files Pin memory thread exited unexpectedly:
+import torch.multiprocessing
+torch.multiprocessing.set_sharing_strategy('file_system')
+
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+logger.info("Loading packages ...")
 
 
 def main(config):
@@ -46,27 +48,30 @@ def main(config):
 
     total_start_time = time.time()
 
-    # Add file logging besides stdout
-    file_handler = logging.FileHandler(os.path.join(config['output_dir'], 'output.log'))
-    logger.addHandler(file_handler)
-
     logger.info('Running:\n{}\n'.format(' '.join(sys.argv)))  # command used to run
 
     if config['seed'] is not None:
         torch.manual_seed(config['seed'])
 
-    device = torch.device('cuda' if (torch.cuda.is_available() and config['gpu'] != '-1') else 'cpu')
-    logger.info("Using device: {}".format(device))
-    if device == 'cuda':
+    device = 'cuda' if (torch.cuda.is_available() and config['gpu'] != '-1') else 'cpu'
+    if device != 'cuda':
+        logger.error("no cuda!! ")
+        exit(-1)
+        device = torch.device(device)
+    else:
+        device = torch.device(device)
+        logger.info("Using device: {}".format(device))
         logger.info("Device index: {}".format(torch.cuda.current_device()))
 
-    # *********** Build data ***********
+
+    # *********** 1. Build data ***********
     logger.info("Loading and preprocessing data ...")
     data_class = data_factory[config['data_class']]
     my_data = data_class(limit_size=config['limit_size'], config=config)
     # feat_dim = my_data.feature_df.shape[1]  # dimensionality of data features
     if 'classification' in config['task']:
-        validation_method = 'StratifiedShuffleSplit'
+        # validation_method = 'StratifiedShuffleSplit'
+        validation_method = 'ShuffleSplit'
         labels = my_data.labels_df.values.flatten()
     else:
         validation_method = 'ShuffleSplit'
@@ -133,7 +138,8 @@ def main(config):
 
     if config['freeze']:
         for name, param in model.named_parameters():
-            if name.startswith('output_layer'):
+            if 'output_layer' in name:
+                logger.info(f'set layer {name} requires_grad = True')
                 param.requires_grad = True
             else:
                 param.requires_grad = False
@@ -157,51 +163,54 @@ def main(config):
     lr_step = 0  # current step index of `lr_step`
     lr = config['lr']  # current learning step
     # Load model and optimizer state
-    if config['task'] == 'DualBranchClassification':
-        if config['load_imputation_branch']:
-            model.imputation_branch = utils.load_model(model.imputation_branch,
-                                                       config['load_imputation_branch'], optimizer,
-                                                       config['resume'],
-                                                       config['change_output'],
-                                                       config['lr'],
-                                                       config['lr_step'],
-                                                       config['lr_factor'])
-        if config['load_denoising_branch']:
-            model.denoising_branch = utils.load_model(model.denoising_branch,
-                                                      config['load_denoising_branch'], optimizer,
-                                                      config['resume'],
-                                                      config['change_output'],
-                                                      config['lr'],
-                                                      config['lr_step'],
-                                                      config['lr_factor'])
-    else:
-        if config['load_model']:
-            model, optimizer, start_epoch = utils.load_model(model, config['load_model'], optimizer, config['resume'],
-                                                             config['change_output'],
-                                                             config['lr'],
-                                                             config['lr_step'],
-                                                             config['lr_factor'])
+    if config['task'] == 'dual_branch_classification':
+        if config['load_trajectory_branch']:
+            model.trajectory_branch, _, __ = utils.load_model(model.trajectory_branch,
+                                                              config['load_trajectory_branch'], optimizer,
+                                                              config['resume'],
+                                                              config['change_output'],
+                                                              config['lr'],
+                                                              config['lr_step'],
+                                                              config['lr_factor'])
+        if config['load_feature_branch']:
+            model.feature_branch, _, __ = utils.load_model(model.feature_branch,
+                                                           config['load_feature_branch'], optimizer,
+                                                           config['resume'],
+                                                           config['change_output'],
+                                                           config['lr'],
+                                                           config['lr_step'],
+                                                           config['lr_factor'])
+
+    if config['load_model']:
+        model, optimizer, start_epoch = utils.load_model(model, config['load_model'], optimizer, config['resume'],
+                                                         config['change_output'],
+                                                         config['lr'],
+                                                         config['lr_step'],
+                                                         config['lr_factor'])
     model.to(device)
     loss_module = get_loss_module(config)
 
     # *********** Only evaluate ***********
-    if config['test_only'] == 'testset':  # Only evaluate and skip training
+    def evaluate_test():
         dataset_class, collate_fn, runner_class = pipeline_factory(config)
         test_dataset = dataset_class(test_data, test_indices)
-
         test_loader = DataLoader(dataset=test_dataset,
                                  batch_size=config['batch_size'],
                                  shuffle=False,
                                  num_workers=config['num_workers'],
                                  pin_memory=True,
-                                 collate_fn=lambda x: collate_fn(x))
+                                 collate_fn=lambda x: collate_fn(x, ))
         test_evaluator = runner_class(model, test_loader, device, loss_module,
                                       print_interval=config['print_interval'], console=config['console'])
         aggr_metrics_test, per_batch_test = test_evaluator.evaluate(keep_all=True)
         print_str = 'Test Summary: '
         for k, v in aggr_metrics_test.items():
-            print_str += '{}: {:8f} | '.format(k, v)
+            if v is not None:
+                print_str += '{}: {:8f} | '.format(k, v)
         logger.info(print_str)
+
+    if config['test_only'] == 'testset':  # Only evaluate and skip training
+        evaluate_test()
         return
 
     # *********** Initialize data generators ***********
@@ -213,19 +222,26 @@ def main(config):
                             shuffle=False,
                             num_workers=config['num_workers'],
                             pin_memory=True,
-                            collate_fn=lambda x: collate_fn(x))
+                            collate_fn=collate_fn)
 
+    # construct WeightedRandomSampler,
+    # see https://medium.com/analytics-vidhya/augment-your-data-easily-with-pytorch-313f5808fc8b
     train_dataset = dataset_class(my_data, train_indices)
-
+    # train_label_unique, counts = np.unique(train_dataset.labels_df, return_counts=True)
+    # class_weights = [sum(counts) / c for c in counts]
+    # sample_weights = [class_weights[e] for e in train_dataset.labels_df[0]]
+    # sampler = WeightedRandomSampler(sample_weights, len(train_dataset.labels_df[0]))
     train_loader = DataLoader(dataset=train_dataset,
                               batch_size=config['batch_size'],
                               shuffle=True,
                               num_workers=config['num_workers'],
                               pin_memory=True,
-                              collate_fn=lambda x: collate_fn(x))
+                              # sampler=sampler,
+                              collate_fn=collate_fn)
+
     # *********** TRICKS **********
     logger.info('data loader to list ...')
-    # note will be automatically shuffled due to it is DataLoader with  shuffle=True
+    # note will be automatically shuffled if the DataLoader with  shuffle=True
     val_loader = list(val_loader)
     train_loader = list(train_loader)
 
@@ -235,7 +251,6 @@ def main(config):
                                  print_interval=config['print_interval'], console=config['console'])
 
     tensorboard_writer = SummaryWriter(config['tensorboard_dir'])
-
 
     # dataloader time consumption test
     if False:
@@ -261,16 +276,23 @@ def main(config):
             exit(0)
 
     # *********** Train record ***********
-    best_value = 1e16 if config[
-                             'key_metric'] in NEG_METRICS else -1e16  # initialize with +inf or -inf depending on key metric
+    best_value = 1e16 \
+        if config['key_metric'] in NEG_METRICS else -1e16  # initialize with +inf or -inf depending on key metric
     metrics = []  # (for validation) list of lists: for each epoch, stores metrics like loss, ...
     best_metrics = {}
 
     # *********** Evaluate on validation before training ***********
-    aggr_metrics_val, best_metrics, best_value = validate(val_evaluator, tensorboard_writer, config, best_metrics,
-                                                          best_value, epoch=0)
-    metrics_names, metrics_values = zip(*aggr_metrics_val.items())
-    metrics.append(list(metrics_values))
+    metrics_names = None
+    if config['val_ratio'] > 0:
+        aggr_metrics_val, best_metrics, best_value = validate(val_evaluator, tensorboard_writer, config, best_metrics,
+                                                              best_value, epoch=0)
+        metrics_names, metrics_values = zip(*aggr_metrics_val.items())
+        metrics.append(list(metrics_values))
+    else:
+        if 'classification' in config['task']:
+            metrics_names = ('epoch', 'loss', 'accuracy', 'precision')
+        else:
+            metrics_names = ('epoch', 'loss')
 
     # *********** Start training ***********
     logger.info('Starting training...')
@@ -280,7 +302,7 @@ def main(config):
         epoch_start_time = time.time()
         aggr_metrics_train = trainer.train_epoch(epoch)  # dictionary of aggregate epoch metrics
         epoch_runtime = time.time() - epoch_start_time
-        print()
+
         print_str = 'Epoch {} Training Summary: '.format(epoch)
         for k, v in aggr_metrics_train.items():
             tensorboard_writer.add_scalar('{}/train'.format(k), v, epoch)
@@ -297,7 +319,8 @@ def main(config):
         logger.info("Avg sample train. time: {} seconds".format(avg_sample_time))
 
         # evaluate if first or last epoch or at specified interval
-        if (epoch == config["epochs"]) or (epoch == start_epoch + 1) or (epoch % config['val_interval'] == 0):
+        if config['val_ratio'] > 0 and \
+                ((epoch == config["epochs"]) or (epoch == start_epoch + 1) or (epoch % config['val_interval'] == 0)):
             aggr_metrics_val, best_metrics, best_value = validate(val_evaluator, tensorboard_writer, config,
                                                                   best_metrics, best_value, epoch)
             metrics_names, metrics_values = zip(*aggr_metrics_val.items())
@@ -321,9 +344,11 @@ def main(config):
             train_loader.dataset.update()
             val_loader.dataset.update()
 
-
     # *********** Results ***********
     # Export evolution of metrics over epochs
+    # if 'classification' in config['task']:
+    #     model =
+    #     evaluate_test()
     header = metrics_names
     metrics_filepath = os.path.join(config["output_dir"], "metrics_" + config["experiment_name"] + ".xls")
     book = utils.export_performance_metrics(metrics_filepath, metrics, header, sheet_name="metrics")
@@ -344,4 +369,6 @@ def main(config):
 if __name__ == '__main__':
     args = Options().parse()  # `argsparse` object
     config = setup(args)  # configuration dictionary
+    dataset.config = config
+    cudnn.benchmark = True
     main(config)

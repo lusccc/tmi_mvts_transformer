@@ -1,7 +1,6 @@
 import builtins
 import functools
 import json
-import logging
 import os
 import sys
 import time
@@ -14,8 +13,7 @@ import xlrd
 import xlwt
 from xlutils.copy import copy
 
-logging.basicConfig(format='%(asctime)s | %(levelname)s : %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
+from logzero import logger
 
 
 def timer(func):
@@ -47,6 +45,7 @@ def save_model(path, epoch, model, optimizer=None):
 
 def load_model(model, model_path, optimizer=None, resume=False, change_output=False,
                lr=None, lr_step=None, lr_factor=None):
+    logger.info(f'load model: {model_path}, change output: {change_output}')
     start_epoch = 0
     checkpoint = torch.load(model_path, map_location=lambda storage, loc: storage)
     state_dict = deepcopy(checkpoint['state_dict'])

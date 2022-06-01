@@ -1,15 +1,17 @@
+import os
 import time
+import random
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-import logging
+import logzero
+from logzero import logger
 
-logging.basicConfig(format='%(asctime)s | %(levelname)s : %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
+config = None
 
 
-def collate_superv(data, max_len=None):
+def collate_generic_superv(data, max_len=None):
     """Build mini-batch tensors from a list of (X, mask) tuples. Mask input. Create
     Args:
         data: len(batch_size) list of tuples (X, y).
@@ -43,10 +45,10 @@ def collate_superv(data, max_len=None):
     padding_masks = padding_mask(torch.tensor(lengths, dtype=torch.int16),
                                  max_len=max_len)  # (batch_size, padded_length) boolean tensor, "1" means keep
 
-    return X, targets, padding_masks, IDs
+    return [X, targets, padding_masks, IDs]
 
 
-def collate_dual_branch_superv(data, max_len=None):
+def collate_dual_branch_superv(data, ):
     batch_size = len(data)
     noise_features_1, noise_features_2, labels, IDs = zip(*data)
 
@@ -68,28 +70,7 @@ def collate_dual_branch_superv(data, max_len=None):
 
     targets = torch.stack(labels, dim=0)  # (batch_size, num_labels)
 
-    return (*X1_X2, *pm1_pm2, targets, IDs)
-
-
-def transduct_mask(X, mask_feats, start_hint=0.0, end_hint=0.0):
-    """
-    Creates a boolean mask of the same shape as X, with 0s at places where a feature should be masked.
-    Args:
-        X: (seq_length, feat_dim) numpy array of features corresponding to a single sample
-        mask_feats: list/array of indices corresponding to features to be masked
-        start_hint:
-        end_hint: proportion at the end of time series which will not be masked
-
-    Returns:
-        boolean numpy array with the same shape as X, with 0s at places where a feature should be masked
-    """
-
-    mask = np.ones(X.shape, dtype=bool)
-    start_ind = int(start_hint * X.shape[0])
-    end_ind = max(start_ind, int((1 - end_hint) * X.shape[0]))
-    mask[start_ind:end_ind, mask_feats] = 0
-
-    return mask
+    return [*X1_X2, *pm1_pm2, targets, IDs]
 
 
 def compensate_masking(X, mask):
@@ -110,7 +91,7 @@ def compensate_masking(X, mask):
     return X.shape[-1] * X / num_active
 
 
-def collate_imputation_unsuperv(data, max_len=None, mask_compensation=False):
+def collate_imputation_unsuperv(data, ):
     t_start = time.time()
 
     batch_size = len(data)
@@ -118,12 +99,12 @@ def collate_imputation_unsuperv(data, max_len=None, mask_compensation=False):
 
     # Stack and pad features and masks (convert 2D to 3D tensors, i.e. add batch dimension)
     lengths = [X.shape[0] for X in noise_features]  # original sequence length for each time series
-    if max_len is None:
-        max_len = max(lengths)
+    max_len = max(lengths)
 
     X_noise = torch.zeros(batch_size, max_len, noise_features[0].shape[-1])  # (batch_size, padded_length, feat_dim)
     X_clean = torch.zeros(batch_size, max_len, clean_features[0].shape[-1])  # (batch_size, padded_length, feat_dim)
-    # (batch_size, padded_length, feat_dim) masks related to objective
+
+    # target_masks: (batch_size, padded_length, feat_dim) masks related to objective
     target_masks = torch.zeros_like(X_noise, dtype=torch.bool)
     for i in range(batch_size):
         end = min(lengths[i], max_len)
@@ -132,19 +113,19 @@ def collate_imputation_unsuperv(data, max_len=None, mask_compensation=False):
         target_masks[i, :end, :] = masks[i][:end, :]
 
     X_noise = X_noise * target_masks  # mask input
-    if mask_compensation:
-        X_noise = compensate_masking(X_noise, target_masks)
 
     padding_masks = padding_mask(torch.tensor(lengths, dtype=torch.int16),
                                  max_len=max_len)  # (batch_size, padded_length) boolean tensor, "1" means keep
-    target_masks = ~target_masks  # inverse logic: 0 now means ignore, 1 means predict
+    # target masks mean the mask impose on y_pred, here is X_clean
+    # inverse logic: 0 now means ignore, 1 means predict
+    target_masks = ~target_masks
 
     # logger.info('collate_imputation_unsuperv time: %s Seconds' % (time.time() - t_start))
 
     return X_noise, X_clean, target_masks, padding_masks, IDs
 
 
-def collate_denoising_unsuperv(data, max_len=None, mask_compensation=False):
+def collate_denoising_unsuperv(data, max_len=None, ):
     t_start = time.time()
 
     batch_size = len(data)
@@ -169,7 +150,7 @@ def collate_denoising_unsuperv(data, max_len=None, mask_compensation=False):
 
     # logger.info('collate_denoising_unsuperv time: %s Seconds' % (time.time() - t_start))
 
-    # below is not correct, padding_masks should not be inverted
+    # below is incorrect, padding_masks should not be inverted
     # target_masks = ~padding_masks.unsqueeze(-1).repeat(1, 1, clean_features[0].shape[
     #     -1])  # (batch_size, padded_length, feat_dim)
     return X_noise, X_clean, target_masks, padding_masks, IDs
@@ -256,13 +237,17 @@ def padding_mask(lengths, max_len=None):
             .lt(lengths.unsqueeze(1)))
 
 
-class SingleBranchClassificationDataset(Dataset):
+
+
+
+class GenericClassificationDataset(Dataset):
     def __init__(self, data, indices):
-        super(SingleBranchClassificationDataset, self).__init__()
+        super(GenericClassificationDataset, self).__init__()
 
         self.data = data  # this is a subclass of the BaseData class in data.py
         self.IDs = indices  # list of data IDs, but also mapping between integer index and ID
         self.noise_feature_df = self.data.noise_feature_df.loc[self.IDs]
+        self.clean_feature_df = self.data.clean_feature_df.loc[self.IDs]
         self.labels_df = self.data.labels_df.loc[self.IDs]
 
     def __getitem__(self, ind):
@@ -275,14 +260,28 @@ class SingleBranchClassificationDataset(Dataset):
             y: (num_labels,) tensor of labels (num_labels > 1 for multi-task models) for each sample
             ID: ID of sample
         """
-
+        ind = int(ind / 2)
         X_noise = self.noise_feature_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim) array
+        X_clean = self.clean_feature_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim) array
         y = self.labels_df.loc[self.IDs[ind]].values  # (num_labels,) array
 
-        return torch.from_numpy(X_noise), torch.from_numpy(y), torch.as_tensor(self.IDs[ind])
+        if config['input_type'] == 'mix':
+            noise_input = random.choice([True, False])
+        elif config['input_type'] == 'clean':
+            noise_input = False
+        else:
+            noise_input = True
+
+        if noise_input:
+            input = X_noise
+        else:
+            input = X_clean
+        target = y
+
+        return torch.from_numpy(input), torch.from_numpy(target), self.IDs[ind]
 
     def __len__(self):
-        return len(self.IDs)
+        return len(self.IDs) * 2
 
 
 class DenoisingDataset(Dataset):
@@ -295,19 +294,82 @@ class DenoisingDataset(Dataset):
         self.IDs = indices  # list of data IDs, but also mapping between integer index and ID
         self.noise_feature_df = self.data.noise_feature_df.loc[self.IDs]
         self.clean_feature_df = self.data.clean_feature_df.loc[self.IDs]
+        self.labels_df = self.data.labels_df.loc[self.IDs]
 
         logger.info('DenoisingDataset __init__ time: %s Seconds' % (time.time() - t_start))
 
         self.exclude_feats = exclude_feats
 
     def __getitem__(self, ind):
+        ind = int(ind / 2)
         X_noise = self.noise_feature_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim) array
         X_clean = self.clean_feature_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim) array
 
-        return torch.from_numpy(X_noise), torch.from_numpy(X_clean), torch.as_tensor(self.IDs[ind])
+        if config['input_type'] == 'mix':
+            noise_input = random.choice([True, False])
+        elif config['input_type'] == 'clean':
+            noise_input = False
+        else:
+            noise_input = True
+
+        if noise_input:
+            input = X_noise
+        else:
+            input = X_clean
+        target = X_clean
+
+        return torch.from_numpy(input), torch.from_numpy(target), self.IDs[ind]
 
     def __len__(self):
-        return len(self.IDs)
+        return len(self.IDs) * 2
+
+
+class DenoisingImputationDataset(Dataset):
+    """
+    proposed
+    """
+    def __init__(self, data, indices, exclude_feats=None):
+        super(DenoisingImputationDataset, self).__init__()
+
+        t_start = time.time()
+
+        self.data = data  # this is a subclass of the BaseData class in data.py
+        self.IDs = indices  # list of data IDs, but also mapping between integer index and ID
+        self.noise_feature_df = self.data.noise_feature_df.loc[self.IDs]
+        self.clean_feature_df = self.data.clean_feature_df.loc[self.IDs]
+        self.noise_mask_df = self.data.masks_df.loc[self.IDs]
+        self.labels_df = self.data.labels_df.loc[self.IDs]
+
+        logger.info('DenoisingImputationDataset __init__ time: %s Seconds' % (time.time() - t_start))
+
+        self.exclude_feats = exclude_feats
+
+    def __getitem__(self, ind):
+        ind = int(ind / 2)
+        X_noise = self.noise_feature_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim) array
+        X_clean = self.clean_feature_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim) array
+        mask = self.noise_mask_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim)
+
+        if config['disable_mask']:
+            mask[:] = 0
+
+        if config['input_type'] == 'mix':
+            noise_input = random.choice([True, False])
+        elif config['input_type'] == 'clean':
+            noise_input = False
+        else:
+            noise_input = True
+
+        if noise_input:
+            input = X_noise
+        else:
+            input = X_clean
+        target = X_clean
+
+        return torch.from_numpy(input), torch.from_numpy(target), torch.from_numpy(mask), self.IDs[ind]
+
+    def __len__(self):
+        return len(self.IDs) * 2
 
 
 class ImputationDataset(Dataset):
@@ -323,22 +385,38 @@ class ImputationDataset(Dataset):
         self.noise_feature_df = self.data.noise_feature_df.loc[self.IDs]
         self.clean_feature_df = self.data.clean_feature_df.loc[self.IDs]
         self.noise_mask_df = self.data.masks_df.loc[self.IDs]
+        self.labels_df = self.data.labels_df.loc[self.IDs]
 
         logger.info('ImputationDataset __init__ time: %s Seconds' % (time.time() - t_start))
 
         self.exclude_feats = exclude_feats
 
     def __getitem__(self, ind):
+        ind = int(ind / 2)
         X_noise = self.noise_feature_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim) array
         X_clean = self.clean_feature_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim) array
         mask = self.noise_mask_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim)
-        return torch.from_numpy(X_noise), torch.from_numpy(X_clean), torch.from_numpy(mask), torch.as_tensor(self.IDs[ind])
+
+        if config['input_type'] == 'mix':
+            noise_input = random.choice([True, False])
+        elif config['input_type'] == 'clean':
+            noise_input = False
+        else:
+            noise_input = True
+
+        if noise_input:
+            input = X_noise
+        else:
+            input = X_clean
+        target = X_clean
+
+        return torch.from_numpy(input), torch.from_numpy(target), torch.from_numpy(mask), self.IDs[ind]
 
     def update(self):
         print('!!!update')
 
     def __len__(self):
-        return len(self.IDs)
+        return len(self.IDs) * 2
 
 
 class DualBranchClassificationDataset(Dataset):
@@ -350,10 +428,22 @@ class DualBranchClassificationDataset(Dataset):
         self.labels_df = data.feature_data.labels_df.loc[self.IDs]
 
     def __getitem__(self, ind):
-        X1_noise = self.imputation_dataset.noise_feature_df.loc[self.IDs[ind]].values
-        X2_noise = self.denoising_dataset.noise_feature_df.loc[self.IDs[ind]].values
+        ind = int(ind / 2)
+        if config['input_type'] == 'mix':
+            noise_input = random.choice([True, False])
+        elif config['input_type'] == 'clean':
+            noise_input = False
+        else:
+            noise_input = True
+
+        if noise_input:
+            X1 = self.imputation_dataset.noise_feature_df.loc[self.IDs[ind]].values
+            X2 = self.denoising_dataset.noise_feature_df.loc[self.IDs[ind]].values
+        else:
+            X1 = self.imputation_dataset.clean_feature_df.loc[self.IDs[ind]].values
+            X2 = self.denoising_dataset.clean_feature_df.loc[self.IDs[ind]].values
         y = self.labels_df.loc[self.IDs[ind]].values  # (num_labels,) array
-        return torch.from_numpy(X1_noise), torch.from_numpy(X2_noise), torch.from_numpy(y), torch.as_tensor(self.IDs[ind])
+        return torch.from_numpy(X1), torch.from_numpy(X2), torch.from_numpy(y), torch.as_tensor(self.IDs[ind])
 
     def __len__(self):
-        return len(self.IDs)
+        return len(self.IDs) * 2

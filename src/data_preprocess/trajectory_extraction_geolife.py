@@ -103,7 +103,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    #                0        1         2      3       4          4                                                         3
+    #                 0        1         2      3       4          4                                                         3
     MODE_NAMES = ['walk', 'bike', 'bus', 'car', 'subway', 'train', 'airplane', 'boat', 'run', 'motorcycle', 'taxi']
     # mode_ids = {s : i + 1 for i, s in enumerate(mode_names)}
     modes = {}

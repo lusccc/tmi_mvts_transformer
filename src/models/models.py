@@ -15,7 +15,7 @@ def model_factory(config, data):
         data: if task == 'dual_branch_classification', data include trj data and trj feature data
     """
     task = config['task']
-    if (task == "imputation") or (task == "denoising"):
+    if task in ['imputation_pretrain', 'denoising_pretrain', 'denoising_imputation_pretrain']:
         feat_dim = data.noise_feature_df.shape[1]
         max_seq_len = data.max_seq_len
         model = TSTransformerEncoder(feat_dim, max_seq_len, config['d_model'], config['num_heads'],
@@ -25,15 +25,29 @@ def model_factory(config, data):
         utils.save_model_hyperparams(config, model.hyperparams)
         return model
 
-    if task == 'dual_branch_classification':
-        return DualTSTransformerEncoderClassifier(utils.load_model_hyperparams(config['imputation_model_hyperparams']),
-                                                  utils.load_model_hyperparams(config['denoising_model_hyperparams']),
+    if task in ['dual_branch_classification', 'dual_branch_classification_from_scratch']:
+        return DualTSTransformerEncoderClassifier(utils.load_model_hyperparams(config['trajectory_branch_hyperparams']),
+                                                  utils.load_model_hyperparams(config['feature_branch_hyperparams']),
                                                   len(data.feature_data.class_names), dropout=config['dropout'],
                                                   activation=config['activation'])
-    if task == 'imputation_branch_classification':
-        return TSTransformerEncoderClassifier(**utils.load_model_hyperparams(config['imputation_model_hyperparams']),
-                                              num_classes=len(data.feature_data.class_names))
-
+    if task == 'trajectory_branch_classification':
+        return TSTransformerEncoderClassifier(**utils.load_model_hyperparams(config['trajectory_branch_hyperparams']),
+                                              num_classes=len(data.class_names))
+    if task == 'feature_branch_classification':
+        return TSTransformerEncoderClassifier(**utils.load_model_hyperparams(config['feature_branch_hyperparams']),
+                                              num_classes=len(data.class_names))
+    if task == 'feature_branch_classification_from_scratch':
+        feat_dim = data.noise_feature_df.shape[1]
+        max_seq_len = data.max_seq_len
+        return TSTransformerEncoderClassifier(feat_dim, max_seq_len, config['d_model'], config['num_heads'],
+                                              config['num_layers'], config['dim_feedforward'],
+                                              num_classes=len(data.class_names), dropout=config['dropout'],
+                                              pos_encoding=config['pos_encoding'], activation=config['activation'],
+                                              norm=config['normalization_layer'], freeze=config['freeze'])
+    if 'cnn_classification' in task:
+        return CNN1DClassifier_128()
+    if 'lstm_classification' in task:
+        return LSTMResClassifier()
 
 
 def _get_activation_fn(activation):
@@ -297,7 +311,7 @@ class TSTransformerEncoderClassifier(nn.Module):
         output = self.dropout1(output)
 
         # Output
-        output = output * padding_masks.unsqueeze(-1)  # zero-out padding embeddings
+        output = output * padding_masks.unsqueeze(-1)  # zero-out padding embeddings, i.e., make padding to 0s
         output = output.reshape(output.shape[0], -1)  # (batch_size, seq_length * d_model)
         output = self.output_layer(output)  # (batch_size, num_classes)
 
@@ -305,35 +319,40 @@ class TSTransformerEncoderClassifier(nn.Module):
 
 
 class DualTSTransformerEncoderClassifier(nn.Module):
-    def __init__(self, imputation_branch_hyperparams, denoising_branch_hyperparams, num_classes, dropout=0.1,
-                 activation='gelu', emb1_size=16, emb2_size=16):
+    def __init__(self, trajectory_branch_hyperparams, feature_branch_hyperparams, num_classes, dropout=0.1,
+                 activation='gelu', emb1_size=64, emb2_size=64):
         super(DualTSTransformerEncoderClassifier, self).__init__()
         self.num_classes = num_classes
-        self.imputation_branch = TSTransformerEncoder(**imputation_branch_hyperparams)
-        self.denoising_branch = TSTransformerEncoder(**denoising_branch_hyperparams)
+        self.trajectory_branch = TSTransformerEncoder(**trajectory_branch_hyperparams)
+        self.feature_branch = TSTransformerEncoder(**feature_branch_hyperparams)
 
         # replace output layer in original model
-        self.imputation_branch.output_layer = nn.Flatten()
-        self.denoising_branch.output_layer = nn.Flatten()
+        self.trajectory_branch.output_layer = nn.Flatten()  # i.e., reshape()
+        self.feature_branch.output_layer = nn.Flatten()
         # then, create new output layer
-        self.encoder1_output_layer = nn.Linear(self.imputation_branch.d_model * self.imputation_branch.max_len,
+        self.encoder1_output_layer = nn.Linear(self.trajectory_branch.d_model * self.trajectory_branch.max_len,
                                                emb1_size)
-        self.encoder2_output_layer = nn.Linear(self.denoising_branch.d_model * self.denoising_branch.max_len, emb2_size)
+        self.encoder2_output_layer = nn.Linear(self.feature_branch.d_model * self.feature_branch.max_len, emb2_size)
 
         # create output layer for this DualTSTransformerEncoderClassifier
         # self.output_layer = nn.Linear(emb1_size + emb2_size, num_classes)
+
+        # the emb from each branch will be added together, so here make output emb size same as each branch
         self.output_layer = nn.Linear(emb1_size, num_classes)
 
         self.act = _get_activation_fn(activation)
         self.dropout1 = nn.Dropout(dropout)
 
     def forward(self, X1, padding_mask1, X2, padding_mask2):
-        output1 = self.imputation_branch(X1, padding_mask1)
+        output1 = self.trajectory_branch(X1, padding_mask1)
         output1 = self.encoder1_output_layer(output1)  # (batch_size, emb1_size)
-        output2 = self.denoising_branch(X2, padding_mask2)
+        output2 = self.feature_branch(X2, padding_mask2)
         output2 = self.encoder2_output_layer(output2)  # (batch_size, emb2_size)
         # output = torch.cat([output1, output2], dim=1)  # (batch_size, emb1_size+emb2_size
         output = torch.add(output1, output2)  # (batch_size, emb1_size+emb2_size
+        # """add gelu:"""
+        # output = self.act(output)
+
         output = self.output_layer(output)
         return output
 
@@ -344,3 +363,223 @@ class LambdaLayer(nn.Module):
 
     def forward(self, x):
         return x
+
+
+# ****** below are COMPARATIVE MODELS:
+
+class CNN1DClassifier_200(nn.Module):
+    """
+    reproduction code for paper `Inferring transportation modes from GPS trajectories using a convolutional neural network'
+    https://github.com/sinadabiri/Transport-Mode-GPS-CNN
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.num_classes = 5
+
+        # 200xn_ori_channels => 200x32
+        self.conv_1 = nn.Conv1d(in_channels=4,
+                                out_channels=32,
+                                kernel_size=3,
+                                stride=1,
+                                # (1*(200-1) - 200 + 3) / 2 = 1
+                                padding=1)
+        #  200x32 => 200x32
+        self.conv_2 = nn.Conv1d(in_channels=32,
+                                out_channels=32,
+                                kernel_size=3,
+                                stride=1,
+                                # (1*(200-1) - 200 + 3) / 2 = 1
+                                padding=1)
+        # 200x32 => 100x32
+        self.pool_1 = nn.MaxPool1d(kernel_size=2,
+                                   stride=2,
+                                   # (2*(100-1) - 200 + 2) / 2 = 0
+                                   padding=0)
+        # 100x100x32 => 100x100x64
+        self.conv_3 = nn.Conv1d(in_channels=32,
+                                out_channels=64,
+                                kernel_size=3,
+                                stride=1,
+                                # (1*(100-1) - 100 + 3) / 2 = 1
+                                padding=1)
+        # 100x100x64 => 100x100x64
+        self.conv_4 = nn.Conv1d(in_channels=64,
+                                out_channels=64,
+                                kernel_size=3,
+                                stride=1,
+                                # (1*(100-1) - 100 + 3) / 2 = 1
+                                padding=1)
+        # 100x64 => 50x64
+        self.pool_2 = nn.MaxPool1d(kernel_size=2,
+                                   stride=2,
+                                   # (2*(50-1) - 100 + 2) / 2 = 0
+                                   padding=0)
+        # 50x64 => 50x128
+        self.conv_5 = nn.Conv1d(in_channels=64,
+                                out_channels=128,
+                                kernel_size=3,
+                                stride=1,
+                                # (1*(50-1) - 50 + 3) / 2 = 1
+                                padding=1)
+        # 50x128 => 50x128
+        self.conv_6 = nn.Conv1d(in_channels=128,
+                                out_channels=128,
+                                kernel_size=3,
+                                stride=1,
+                                # (1*(50-1) - 50 + 3) / 2 = 1
+                                padding=1)
+        # 50x128 => 25x128
+        self.pool_3 = nn.MaxPool1d(kernel_size=2,
+                                   stride=2,
+                                   # (2*(25-1) - 50 + 2) / 2 = 0
+                                   padding=0)
+        self.flatten = nn.Flatten()
+        self.dropout = nn.Dropout(.5)
+        self.dense = nn.Linear(25 * 128, self.num_classes)
+
+    def forward(self, x, *args, **kwargs):
+        x = x.permute(0, 2, 1)
+        x = self.conv_1(x)
+        x = F.relu(x)
+        x = self.conv_2(x)
+        x = F.relu(x)
+        x = self.pool_1(x)
+        x = self.conv_3(x)
+        x = F.relu(x)
+        x = self.conv_4(x)
+        x = F.relu(x)
+        x = self.pool_2(x)
+        x = self.conv_5(x)
+        x = F.relu(x)
+        x = self.conv_6(x)
+        x = F.relu(x)
+        x = self.pool_3(x)
+        x = self.dropout(x)
+        x = self.flatten(x)
+        x = self.dense(x)
+        return x
+
+
+class CNN1DClassifier_128(nn.Module):
+    """
+    reproduction code for paper `Inferring transportation modes from GPS trajectories using a convolutional neural network'
+    https://github.com/sinadabiri/Transport-Mode-GPS-CNN
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.num_classes = 5
+
+        # 128xn_ori_channels => 128x32
+        self.conv_1 = nn.Conv1d(in_channels=4,
+                                out_channels=32,
+                                kernel_size=3,
+                                stride=1,
+                                # (1*(128-1) - 128 + 3) / 2 = 1
+                                padding=1)
+        #  128x32 => 128x32
+        self.conv_2 = nn.Conv1d(in_channels=32,
+                                out_channels=32,
+                                kernel_size=3,
+                                stride=1,
+                                # (1*(128-1) - 128 + 3) / 2 = 1
+                                padding=1)
+        # 128x32 => 64x32
+        self.pool_1 = nn.MaxPool1d(kernel_size=2,
+                                   stride=2,
+                                   # (2*(64-1) - 128 + 2) / 2 = 0
+                                   padding=0)
+        # 64x64x32 => 64x64x64
+        self.conv_3 = nn.Conv1d(in_channels=32,
+                                out_channels=64,
+                                kernel_size=3,
+                                stride=1,
+                                # (1*(64-1) - 64 + 3) / 2 = 1
+                                padding=1)
+        # 64x64x64 => 64x64x64
+        self.conv_4 = nn.Conv1d(in_channels=64,
+                                out_channels=64,
+                                kernel_size=3,
+                                stride=1,
+                                # (1*(64-1) - 64 + 3) / 2 = 1
+                                padding=1)
+        # 64x64 => 32x64
+        self.pool_2 = nn.MaxPool1d(kernel_size=2,
+                                   stride=2,
+                                   # (2*(32-1) - 64 + 2) / 2 = 0
+                                   padding=0)
+        # 32x64 => 32x128
+        self.conv_5 = nn.Conv1d(in_channels=64,
+                                out_channels=128,
+                                kernel_size=3,
+                                stride=1,
+                                # (1*(32-1) - 32 + 3) / 2 = 1
+                                padding=1)
+        # 32x128 => 32x128
+        self.conv_6 = nn.Conv1d(in_channels=128,
+                                out_channels=128,
+                                kernel_size=3,
+                                stride=1,
+                                # (1*(32-1) - 32 + 3) / 2 = 1
+                                padding=1)
+        # 32x128 => 16x128
+        self.pool_3 = nn.MaxPool1d(kernel_size=2,
+                                   stride=2,
+                                   # (2*(16-1) - 32 + 2) / 2 = 0
+                                   padding=0)
+        self.flatten = nn.Flatten()
+        self.dropout = nn.Dropout(.5)
+        self.dense = nn.Linear(16 * 128, self.num_classes)
+
+    def forward(self, x, *args, **kwargs):
+        x = x.permute(0, 2, 1)
+        x = self.conv_1(x)
+        x = F.relu(x)
+        x = self.conv_2(x)
+        x = F.relu(x)
+        x = self.pool_1(x)
+        x = self.conv_3(x)
+        x = F.relu(x)
+        x = self.conv_4(x)
+        x = F.relu(x)
+        x = self.pool_2(x)
+        x = self.conv_5(x)
+        x = F.relu(x)
+        x = self.conv_6(x)
+        x = F.relu(x)
+        x = self.pool_3(x)
+        x = self.dropout(x)
+        x = self.flatten(x)
+        x = self.dense(x)
+        return x
+
+
+class LSTMResClassifier(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.num_classes = 5
+        self.lstm1 = nn.LSTM(input_size=4, hidden_size=128)
+        self.lstm2 = nn.LSTM(input_size=128, hidden_size=512)
+        self.lstm3 = nn.LSTM(input_size=512, hidden_size=512)
+        self.lstm4 = nn.LSTM(input_size=512, hidden_size=512)
+        self.lstm5 = nn.LSTM(input_size=512, hidden_size=512)
+        self.lstm6 = nn.LSTM(input_size=512, hidden_size=128)
+        self.fcl1 = nn.Linear(128, 32)
+        self.dropout1 = nn.Dropout(.3)
+        self.fcl2 = nn.Linear(32, self.num_classes)
+
+    def forward(self, x, *args, **kwargs):
+        #  (batch_size, seq_length, feat_dim) to (seq_length, batch_size, feat_dim)
+        inp = x.permute(1, 0, 2)
+        l1_out, _ = self.lstm1(inp)
+        l2_out, _ = self.lstm2(l1_out)
+        l3_out, _ = self.lstm3(l2_out)
+        l4_out, _ = self.lstm4(l2_out + l3_out)
+        l5_out, _ = self.lstm5(l3_out + l4_out)
+        l6_out, _ = self.lstm6(l4_out + l5_out)
+        out = self.fcl1(l6_out)
+        out = self.dropout1(out)
+        out = F.relu(out)
+        out = self.fcl2(out[-1, :, :])
+        return out

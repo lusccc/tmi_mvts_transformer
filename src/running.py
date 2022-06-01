@@ -1,5 +1,4 @@
 import json
-import logging
 import os
 import pickle
 import random
@@ -18,13 +17,16 @@ from torch import Tensor
 from torch.profiler import tensorboard_trace_handler
 from torch.utils.data import DataLoader
 
-from datasets.dataset import DenoisingDataset, collate_denoising_unsuperv, collate_superv, \
-    ImputationDataset, collate_imputation_unsuperv, DualBranchClassificationDataset, collate_dual_branch_superv
+from datasets.dataset import DenoisingDataset, collate_denoising_unsuperv, collate_generic_superv, \
+    ImputationDataset, collate_imputation_unsuperv, DualBranchClassificationDataset, collate_dual_branch_superv, \
+    GenericClassificationDataset, DenoisingImputationDataset
 from models.loss import l2_reg_loss
-from models.ts_transformer import DualTSTransformerEncoderClassifier
+from models.models import DualTSTransformerEncoderClassifier
 from utils import utils, analysis
+import logzero
+from logzero import logger
 
-logger = logging.getLogger('__main__')
+
 
 NEG_METRICS = {'loss'}  # metrics for which "better" is less
 
@@ -37,12 +39,18 @@ def pipeline_factory(config):
 
     task = config['task']
 
-    if task == "denoising":
+    if task == "denoising_pretrain":
         return DenoisingDataset, collate_denoising_unsuperv, UnsupervisedRunner
-    if task == "imputation":
+    if task == "imputation_pretrain":
         return ImputationDataset, collate_imputation_unsuperv, UnsupervisedRunner
-    if task == "dual_branch_classification":
+    if task == "denoising_imputation_pretrain":
+        return DenoisingImputationDataset, collate_imputation_unsuperv, UnsupervisedRunner
+    if task in ['dual_branch_classification', 'dual_branch_classification_from_scratch']:
         return DualBranchClassificationDataset, collate_dual_branch_superv, SupervisedRunner
+    if task in ['feature_branch_classification', 'feature_branch_classification_from_scratch', 'trajectory_branch_classification',]:
+        return GenericClassificationDataset, collate_generic_superv, SupervisedRunner
+    if "cnn_classification" in task or "lstm_classification" in task:
+        return GenericClassificationDataset, collate_generic_superv, SupervisedRunner
     else:
         raise NotImplementedError("Task '{}' not implemented".format(task))
 
@@ -85,6 +93,7 @@ def setup(args):
     config['pred_dir'] = os.path.join(output_dir, 'predictions')
     config['tensorboard_dir'] = os.path.join(output_dir, 'tb_summaries')
     utils.create_dirs([config['save_dir'], config['pred_dir'], config['tensorboard_dir']])
+    logzero.logfile(os.path.join(output_dir, 'output.log'), backupCount=3)
 
     # Save configuration as a (pretty) json file
     with open(os.path.join(output_dir, 'configuration.json'), 'w') as fp:
@@ -218,6 +227,11 @@ def validate(val_evaluator, tensorboard_writer, config, best_metrics, best_value
     if condition:
         best_value = aggr_metrics[config['key_metric']]
         utils.save_model(os.path.join(config['save_dir'], 'model_best.pth'), epoch, val_evaluator.model)
+        # save to tmp, to make convenient train as pipline in shell
+        try:
+            utils.save_model(os.path.join('experiments', 'tmp', config['data_class']+ '_model_best.pth'), epoch, val_evaluator.model)
+        except:
+            pass
         best_metrics = aggr_metrics.copy()
 
         pred_filepath = os.path.join(config['pred_dir'], 'best_predictions')
@@ -286,6 +300,8 @@ class UnsupervisedRunner(BaseRunner):
             # Cascade noise masks (batch_size, padded_length, feat_dim) and padding masks (batch_size, padded_length)
             loss = self.loss_module(predictions, targets,
                                     target_masks)  # (num_active,) individual loss (square error per element) for each active value in batch
+            # loss = self.loss_module(predictions, targets,
+            #                         )
             batch_loss = torch.sum(loss)
             mean_loss = batch_loss / len(loss)  # mean loss (over active elements) used for optimization
 
@@ -392,6 +408,8 @@ class UnsupervisedRunner(BaseRunner):
             # Cascade noise masks (batch_size, padded_length, feat_dim) and padding masks (batch_size, padded_length)
             loss = self.loss_module(predictions, targets,
                                     target_masks)  # (num_active,) individual loss (square error per element) for each active value in batch
+            # loss = self.loss_module(predictions, targets,
+            #                         )
             batch_loss = torch.sum(loss).cpu().item()
             mean_loss = batch_loss / len(loss)  # mean loss (over active elements) used for optimization the batch
 
@@ -434,16 +452,16 @@ class SupervisedRunner(BaseRunner):
         total_samples = 0  # total samples in epoch
 
         for i, batch in enumerate(self.dataloader):
-            for i, e in enumerate(batch):
+            for j, e in enumerate(batch):
                 if isinstance(e, Tensor):
-                    batch[i] = e.to(self.device)
+                    batch[j] = e.to(self.device)
             if self.is_dual_branch:
                 X1, X2, padding_masks1, padding_masks2, targets, IDs = batch  # 0s: ignore
                 # classification: (batch_size, num_classes) of logits
                 predictions = self.model(X1, padding_masks1, X2, padding_masks2)
             else:
                 X, targets, padding_masks, IDs = batch  # 0s: ignore
-                predictions = self.model(X.to(self.device), padding_masks)
+                predictions = self.model(X, padding_masks)  # for CNN1D_Classifier, padding_masks is not used
 
             loss = self.loss_module(predictions, targets)  # (batch_size,) loss for each sample in the batch
             batch_loss = torch.sum(loss)
@@ -485,10 +503,9 @@ class SupervisedRunner(BaseRunner):
 
         per_batch = {'target_masks': [], 'targets': [], 'predictions': [], 'metrics': [], 'IDs': []}
         for i, batch in enumerate(self.dataloader):
-
-            for i, e in enumerate(batch):
+            for j, e in enumerate(batch):
                 if isinstance(e, Tensor):
-                    batch[i] = e.to(self.device)
+                    batch[j] = e.to(self.device)
             if self.is_dual_branch:
                 X1, X2, padding_masks1, padding_masks2, targets, IDs = batch  # 0s: ignore
                 # classification: (batch_size, num_classes) of logits
@@ -502,11 +519,12 @@ class SupervisedRunner(BaseRunner):
             mean_loss = batch_loss / len(loss)  # mean loss (over samples)
 
             per_batch['targets'].append(targets.cpu().numpy())
-            per_batch['predictions'].append(predictions.cpu().numpy())
-            per_batch['metrics'].append([loss.cpu().numpy()])
+            per_batch['predictions'].append(predictions.cpu().detach().numpy())
+            per_batch['metrics'].append([loss.cpu().detach().numpy()])
             per_batch['IDs'].append(IDs)
 
             metrics = {"loss": mean_loss}
+            print(i)
             if i % self.print_interval == 0:
                 ending = "" if epoch_num is None else 'Epoch {} '.format(epoch_num)
                 self.print_callback(i, metrics, prefix='Evaluating ' + ending)
@@ -525,6 +543,7 @@ class SupervisedRunner(BaseRunner):
         probs = probs.cpu().numpy()
         targets = np.concatenate(per_batch['targets'], axis=0).flatten()
         class_names = np.arange(probs.shape[1])  # TODO: temporary until I decide how to pass class names
+
         metrics_dict = self.analyzer.analyze_classification(predictions, targets, class_names)
 
         self.epoch_metrics['accuracy'] = metrics_dict['total_accuracy']  # same as average recall over all classes

@@ -12,7 +12,7 @@ from logzero import logger
 from utils import interp_single_seg, interp_trj_seg
 from utils import segment_single_series
 from utils import check_lat_lng, timestamp_to_hour, calc_initial_compass_bearing, \
-    to_categorical, get_consecutive_ones_range_indices
+    to_categorical, get_consecutive_ones_range_indices, generate_mask_using_CPD
 
 import matplotlib
 
@@ -26,15 +26,20 @@ define stay time as 20min
 MAX_STAY_TIME_INTERVAL = 60 * 20
 MIN_N_POINTS = 10
 MAX_N_POINTS = 128
-# 0,    1,    2,   3,         4
-# walk, bike, bus, driving, train/subway,
 
-# for geolife and SHL 5 classification, limit for different modes:
+"""
+5 classification labels
+0,    1,    2,   3,         4
+walk, bike, bus, driving, train/subway,
+"""
 SPEED_LIMIT = {0: 7, 1: 12, 2: 120. / 3.6, 3: 180. / 3.6, 4: 120 / 3.6, }
 # acceleration
 ACC_LIMIT = {0: 3, 1: 3, 2: 2, 3: 10, 4: 3, }
 
-# for SHL 7 or 8 classification, Null=0, Still=1, Walking=2, Run=3, Bike=4, Car=5, Bus=6, Train=7, Subway=8
+"""
+for SHL 7 or 8 classification,
+Null=0, Still=1, Walking=2, Run=3, Bike=4, Car=5, Bus=6, Train=7, Subway=8
+"""
 SPEED_LIMIT_7 = {2: 7, 4: 12, 6: 120. / 3.6, 5: 180. / 3.6, 7: 120 / 3.6, 1: 1, 3: 40 / 3.6, 8: 120 / 3.6}
 # acceleration
 ACC_LIMIT_7 = {2: 3, 4: 3, 6: 2, 5: 10, 7: 3, 1: 1, 3: 3, 8: 3}
@@ -175,36 +180,38 @@ def calc_feature(trj_segs, trj_seg_labels):
         tasks.append(pool.apply_async(do_calc_feature,
                                       (trj_segs[i * batch_size:(i + 1) * batch_size],
                                        trj_seg_labels[i * batch_size:(i + 1) * batch_size],
-                                       args.n_class
+                                       args
                                        )))
     res = np.array(
-        [[t.get()[0], t.get()[1], t.get()[2], t.get()[3], t.get()[4], t.get()[5], t.get()[6], t.get()[7]] for t in
-         tasks],
+        [[t.get()[0], t.get()[1], t.get()[2], t.get()[3], t.get()[4], t.get()[5], t.get()[6], t.get()[7], t.get()[8]]
+         for t in tasks],
         dtype=object)
     logger.info('merging...')
     ns_trj_segs = np.concatenate(res[:, 0])
     cn_trj_segs = np.concatenate(res[:, 1])
-    ns_trj_seg_masks = np.concatenate(res[:, 2])
-    ns_multi_feature_segs = np.concatenate(res[:, 3])
-    cn_multi_feature_segs = np.concatenate(res[:, 4])
-    multi_feature_seg_labels = np.concatenate(res[:, 5])
-    n_removed_points = np.vstack(res[:, 6])
-    n_total_points = np.vstack(res[:, 7])
-    return ns_trj_segs, cn_trj_segs, ns_trj_seg_masks, ns_multi_feature_segs, cn_multi_feature_segs, \
+    fs_seg_masks = np.concatenate(res[:, 2])
+    trj_seg_masks = np.concatenate(res[:, 3])
+    ns_multi_feature_segs = np.concatenate(res[:, 4])
+    cn_multi_feature_segs = np.concatenate(res[:, 5])
+    multi_feature_seg_labels = np.concatenate(res[:, 6])
+    n_removed_points = np.vstack(res[:, 7])
+    n_total_points = np.vstack(res[:, 8])
+    return ns_trj_segs, cn_trj_segs, fs_seg_masks, trj_seg_masks, ns_multi_feature_segs, cn_multi_feature_segs, \
            multi_feature_seg_labels, n_removed_points, n_total_points
 
 
-def do_calc_feature(trj_segs, trj_seg_labels, n_class):
+def do_calc_feature(trj_segs, trj_seg_labels, args):
     # ns: noise, cn: clean, i.e., noise filtered
     cn_trj_segs = []  # only keep lon and lat, which are interpolated to align the size of ns_trj_seg
     ns_trj_segs = []  # only keep lon and lat
-    ns_trj_seg_masks = []  # mask for ns_trj_segs
+    fs_seg_masks = []  # mask generated from clean features
+    trj_seg_masks = []  # mask generated from clean trjs
 
     ns_multi_feature_segs = []
     cn_multi_feature_segs = []
     multi_feature_seg_labels = []
-    n_removed_points = [0 for i in range(n_class)]  # count removed points for each class
-    n_total_points = [0 for i in range(n_class)]  # count all points for each class
+    n_removed_points = [0 for i in range(args.n_class)]  # count removed points for each class
+    n_total_points = [0 for i in range(args.n_class)]  # count all points for each class
 
     for i, (trj_seg, trj_seg_label) in enumerate(zip(trj_segs, trj_seg_labels)):
         n_points = len(trj_seg)
@@ -263,7 +270,7 @@ def do_calc_feature(trj_segs, trj_seg_labels, n_class):
             h = calc_initial_compass_bearing(p_a, p_b)
             # heading change
             # hc = h - prev_h
-            hc = abs(h - prev_h) #   changed to abs !
+            hc = abs(h - prev_h)  # changed to abs !
             # heading change rate
             hcr = hc / delta_t
             # is likely stop
@@ -272,8 +279,8 @@ def do_calc_feature(trj_segs, trj_seg_labels, n_class):
             turn = 0 if abs(hc) < LIKELY_TURN_ANGLE_THRESHOLD else 1
 
             # ************ 2.SAVE CLEAN FEATURE ************
-            speed_limit = SPEED_LIMIT if n_class == 5 else SPEED_LIMIT_7
-            acc_limit = ACC_LIMIT if n_class == 5 else ACC_LIMIT_7
+            speed_limit = SPEED_LIMIT if args.n_class == 5 else SPEED_LIMIT_7
+            acc_limit = ACC_LIMIT if args.n_class == 5 else ACC_LIMIT_7
             # feature value in valid range
             if abs(v) <= speed_limit[trj_seg_label] and abs(a) <= acc_limit[trj_seg_label]:
                 cn_delta_times.append(delta_t)
@@ -304,16 +311,12 @@ def do_calc_feature(trj_segs, trj_seg_labels, n_class):
             ns_heading_changes.append(hc)
             ns_heading_change_rates.append(hcr)
             ns_timestamps.append(timestamps)
-            # since below two states used to generate mask for raw gps coordinate data,
-            # should be placed at noise feature
-            stop_states.append(stop)
-            turn_states.append(turn)
 
         if len(cn_delta_times) < MIN_N_POINTS:
             # logger.info('feature element num not enough:{}'.format(len(cn_delta_times)))
             continue
 
-        if n_class != 5:
+        if args.n_class != 5:
             # SHL 7or8 classification label start with 1
             n_removed_points[trj_seg_label - 1] += len(ns_indices)
             n_total_points[trj_seg_label - 1] += n_points
@@ -352,23 +355,13 @@ def do_calc_feature(trj_segs, trj_seg_labels, n_class):
         cn_multi_feature_segs.append(cn_multi_feature_seg)
         multi_feature_seg_labels.append(trj_seg_label)
 
-        # ************ 5.GENERATE MASK ************
-        stop_seg_range = get_consecutive_ones_range_indices(stop_states, MIN_MASK_SEG_LEN)
-        turn_seg_range = get_consecutive_ones_range_indices(turn_states, MIN_MASK_SEG_LEN)
-
-        # 0s means mask, 1s means not affected
-        ns_trj_seg_mask = np.ones(n_points)
-        if len(stop_seg_range) > 0:
-            for s_range in stop_seg_range:
-                ns_trj_seg_mask[s_range[0]:s_range[1] + 1] = 0
-        if len(turn_seg_range) > 0:
-            for t_range in turn_seg_range:
-                ns_trj_seg_mask[t_range[0]:t_range[1] + 1] = 0
-        # noise points are also masked
-        if len(ns_indices) > 0:
-            for ns_ind in ns_indices:
-                ns_trj_seg_mask[ns_ind] = 0
-        ns_trj_seg_masks.append(ns_trj_seg_mask)
+        # ************ 5.GENERATE MASK FOR CLEAN FEATURE SEG ************
+        # note masks are generated from clean features, using change point detection algorithm
+        fs_seg_mask = []
+        for fs_seg in cn_multi_feature_seg[:-1]:
+            msk = generate_mask_using_CPD(fs_seg, args.mask_ratio, args.mean_mask_length)
+            fs_seg_mask.append(msk)
+        fs_seg_masks.append(fs_seg_mask)
 
         # ************ 6.SAVE NOISE AND CLEAN TRAJECTORY ************
         cn_trj_seg = interp_trj_seg(np.delete(trj_seg, ns_indices, axis=0), n_points)  # only keep lon, lat
@@ -376,11 +369,17 @@ def do_calc_feature(trj_segs, trj_seg_labels, n_class):
         cn_trj_segs.append([cn_trj_seg[:, 0], cn_trj_seg[:, 1]])  # convert to list to avoid numpy broadcast error
         ns_trj_segs.append([ns_trj_seg[:, 0], ns_trj_seg[:, 1]])
 
+        # ************ 6.GENERATE MASK FOR CLEAN TRJ SEG ************
+        # generate a mask seg by considering lat and lon simultaneously
+        trj_seg_mask = generate_mask_using_CPD(cn_trj_seg, args.mask_ratio, args.mean_mask_length)
+        trj_seg_masks.append(trj_seg_mask)
+
     logger.info('* end a thread calc feature')
     return \
         np.array(ns_trj_segs, dtype=object), \
         np.array(cn_trj_segs, dtype=object), \
-        np.array(ns_trj_seg_masks, dtype=object), \
+        np.array(fs_seg_masks, dtype=object), \
+        np.array(trj_seg_masks, dtype=object), \
         np.array(ns_multi_feature_segs, dtype=object), \
         np.array(cn_multi_feature_segs, dtype=object), \
         np.array(multi_feature_seg_labels), \
@@ -401,6 +400,9 @@ if __name__ == '__main__':
     parser.add_argument('--labels_path', type=str, required=True)
     parser.add_argument('--n_class', type=int, default=5)  # use modes:2,4,6,5,7
     parser.add_argument('--save_dir', type=str, required=True)
+    parser.add_argument('--mean_mask_length', type=float, default=3, )
+    parser.add_argument('--mask_ratio', type=float, default=0.15)
+
     args = parser.parse_args()
 
     # raw data
@@ -420,7 +422,8 @@ if __name__ == '__main__':
     # calc motion feature. n_removed_points, n_total_points are point number over class
     ns_trj_segs, \
     cn_trj_segs, \
-    ns_trj_seg_masks, \
+    fs_seg_masks, \
+    trj_seg_masks, \
     ns_multi_feature_segs, \
     cn_multi_feature_segs, \
     multi_feature_seg_labels, \
@@ -440,7 +443,8 @@ if __name__ == '__main__':
         os.makedirs(args.save_dir)
     np.save(f'{args.save_dir}/noise_trj_segs.npy', ns_trj_segs)
     np.save(f'{args.save_dir}/clean_trj_segs.npy', cn_trj_segs)
-    np.save(f'{args.save_dir}/noise_trj_seg_masks.npy', ns_trj_seg_masks)
+    np.save(f'{args.save_dir}/fs_seg_masks.npy', fs_seg_masks)
+    np.save(f'{args.save_dir}/trj_seg_masks.npy', trj_seg_masks)
     np.save(f'{args.save_dir}/clean_multi_feature_segs.npy', cn_multi_feature_segs)
     np.save(f'{args.save_dir}/clean_multi_feature_seg_labels.npy', multi_feature_seg_labels)
     np.save(f'{args.save_dir}/noise_multi_feature_segs.npy', ns_multi_feature_segs)
