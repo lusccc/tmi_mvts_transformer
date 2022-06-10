@@ -64,27 +64,28 @@ class MaskedMSELoss(nn.Module):
         if reduction == 'mean':
             scalar mean loss over batch as a tensor with gradient attached.
         """
-        all_loss = []
-        for m, y_p, y_t in zip(mask, y_pred, y_true):
-            m_col = m[:,0]
-            n_non_mask = torch.count_nonzero(m_col) # number of 1s
-            n_mask = m_col.shape[0] - n_non_mask
 
-            mask_ratio = n_mask/m_col.shape[0]
-            if .15 < mask_ratio < .3:
-                loss = self.mse_loss(torch.masked_select(y_p, m), torch.masked_select(y_t, m))
-            else:
-                loss = self.mse_loss(y_p, y_t)
-
-            all_loss.append(loss)
-
-        return torch.cat(all_loss)
-
+        """
+        below deprecated
+        """
+        # all_loss = []
+        # for m, y_p, y_t in zip(mask, y_pred, y_true):
+        #     m_col = m[:,0]
+        #     n_non_mask = torch.count_nonzero(m_col) # number of 1s
+        #     n_mask = m_col.shape[0] - n_non_mask
+        #
+        #     mask_ratio = n_mask/m_col.shape[0]
+        #     if .15 < mask_ratio < .3:
+        #         loss = self.mse_loss(torch.masked_select(y_p, m), torch.masked_select(y_t, m))
+        #     else:
+        #         loss = self.mse_loss(y_p, y_t)
+        #
+        #     all_loss.append(loss)
+        #
+        # return torch.cat(all_loss)
 
         # for this particular loss, one may also elementwise multiply y_pred and y_true with the inverted mask
-        # masked_pred = torch.masked_select(y_pred, mask)
-        # masked_true = torch.masked_select(y_true, mask)
-        #
-        # loss = self.mse_loss(masked_pred, masked_true)
-        #
-        # return loss
+        masked_pred = torch.masked_select(y_pred, mask)
+        masked_true = torch.masked_select(y_true, mask)
+
+        return self.mse_loss(masked_pred, masked_true)

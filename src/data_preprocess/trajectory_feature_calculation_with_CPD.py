@@ -370,9 +370,16 @@ def do_calc_feature(trj_segs, trj_seg_labels, args):
         ns_trj_segs.append([ns_trj_seg[:, 0], ns_trj_seg[:, 1]])
 
         # ************ 6.GENERATE MASK FOR CLEAN TRJ SEG ************
-        # generate a mask seg by considering lat and lon simultaneously
+        # generate a mask seg by considering lat and lon SIMULTANEOUSLY
         trj_seg_mask = generate_mask_using_CPD(cn_trj_seg, args.mask_ratio, args.mean_mask_length)
         trj_seg_masks.append(trj_seg_mask)
+
+        # generate a mask seg by considering lat and lon SEPARATELY
+        # trj_seg_mask = [
+        #     generate_mask_using_CPD(cn_trj_seg[:, 0], args.mask_ratio, args.mean_mask_length),
+        #     generate_mask_using_CPD(cn_trj_seg[:, 1], args.mask_ratio, args.mean_mask_length),
+        # ]
+        # trj_seg_masks.append(trj_seg_mask)
 
     logger.info('* end a thread calc feature')
     return \
@@ -400,8 +407,8 @@ if __name__ == '__main__':
     parser.add_argument('--labels_path', type=str, required=True)
     parser.add_argument('--n_class', type=int, default=5)  # use modes:2,4,6,5,7
     parser.add_argument('--save_dir', type=str, required=True)
-    parser.add_argument('--mean_mask_length', type=float, default=3, )
-    parser.add_argument('--mask_ratio', type=float, default=0.15)
+    parser.add_argument('--mean_mask_length', type=float, default=4, )
+    parser.add_argument('--mask_ratio', type=float, default=0.5)
 
     args = parser.parse_args()
 

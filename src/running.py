@@ -231,7 +231,7 @@ def validate(val_evaluator, tensorboard_writer, config, best_metrics, best_value
         try:
             utils.save_model(os.path.join('experiments', 'tmp', config['data_class']+ '_model_best.pth'), epoch, val_evaluator.model)
         except:
-            pass
+            logger.error('no tmp dir!')
         best_metrics = aggr_metrics.copy()
 
         pred_filepath = os.path.join(config['pred_dir'], 'best_predictions')
@@ -259,7 +259,6 @@ class BaseRunner(object):
         self.l2_reg = l2_reg
         self.print_interval = print_interval
         self.printer = utils.Printer(console=console)
-
         self.epoch_metrics = OrderedDict()
 
     def train_epoch(self, epoch_num=None):

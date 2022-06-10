@@ -138,12 +138,13 @@ class FeatureData(object):
             noise_multi_feature_seg_labels_np = np.load(
                 f'./data/{self.data_name}_features/noise_multi_feature_seg_labels.npy')
             noise_multi_feature_segs = pd.DataFrame(noise_multi_feature_segs_np)
-            noise_trj_seg_masks_np = np.load(f'./data/{self.data_name}_features/noise_trj_seg_masks.npy',
-                                             allow_pickle=True)
-            noise_trj_seg_masks_np = np.array(
-                [noise_trj_seg_masks_np for _ in range(noise_multi_feature_segs_np.shape[1])]).T  # duplicate for all feature
+            fs_seg_masks_np = np.load(f'./data/{self.data_name}_features/fs_seg_masks.npy', allow_pickle=True)
 
-            noise_trj_seg_masks = pd.DataFrame(noise_trj_seg_masks_np)
+            # deprecated
+            # fs_seg_masks_np = np.array(
+            #     [fs_seg_masks_np for _ in range(noise_multi_feature_segs_np.shape[1])]).T  # duplicate for all feature
+
+            fs_seg_masks = pd.DataFrame(fs_seg_masks_np)
             # ---------- * note noise_multi_feature_seg_labels and
             # clean_multi_feature_seg_labels are same, either will be ok
             labels_df = pd.DataFrame(noise_multi_feature_seg_labels_np)
@@ -178,9 +179,9 @@ class FeatureData(object):
                  range(clean_multi_feature_segs.shape[0])),
                 axis=0)
             masks_df = pd.concat(
-                (pd.DataFrame({col: noise_trj_seg_masks.loc[row, col] for col in noise_trj_seg_masks.columns})
+                (pd.DataFrame({col: fs_seg_masks.loc[row, col] for col in fs_seg_masks.columns})
                      .reset_index(drop=True)
-                     .set_index(pd.Series(lengths[row, 0] * [row])) for row in range(noise_trj_seg_masks.shape[0])),
+                     .set_index(pd.Series(lengths[row, 0] * [row])) for row in range(fs_seg_masks.shape[0])),
                 axis=0)
             logger.info(f'save to file: {noise_df_path}, {clean_df_path}')
             noise_df.to_pickle(noise_df_path)
@@ -245,13 +246,15 @@ class TrajectoryData(object):
         else:
             noise_trj_segs_np = np.load(f'./data/{self.data_name}_features/noise_trj_segs.npy', allow_pickle=True)
             clean_trj_segs_np = np.load(f'./data/{self.data_name}_features/clean_trj_segs.npy', allow_pickle=True)
-            noise_trj_seg_masks_np = np.load(f'./data/{self.data_name}_features/noise_trj_seg_masks.npy',
-                                             allow_pickle=True)
-            noise_trj_seg_masks_np = np.array(
-                [noise_trj_seg_masks_np, noise_trj_seg_masks_np]).T  # duplicate for lon and lat
+            trj_seg_masks_np = np.load(f'./data/{self.data_name}_features/trj_seg_masks.npy', allow_pickle=True)
+
+            # duplicate for lon and lat, note it is used for the condition of
+            # `generate a mask seg by considering lat and lon SIMULTANEOUSLY`
+            # trj_seg_masks_np = np.array([trj_seg_masks_np, trj_seg_masks_np]).T
+
             noise_trj_segs = pd.DataFrame(noise_trj_segs_np)
             clean_trj_segs = pd.DataFrame(clean_trj_segs_np)
-            noise_trj_seg_masks = pd.DataFrame(noise_trj_seg_masks_np)
+            trj_seg_masks = pd.DataFrame(trj_seg_masks_np)
             # ----------* load label for WeightedRandomSampler in main.py, note noise_multi_feature_seg_labels and
             # clean_multi_feature_seg_labels are same, either will be ok
             noise_multi_feature_seg_labels_np = np.load(
@@ -277,9 +280,9 @@ class TrajectoryData(object):
                      .set_index(pd.Series(lengths[row, 0] * [row])) for row in range(clean_trj_segs.shape[0])),
                 axis=0)
             masks_df = pd.concat(
-                (pd.DataFrame({col: noise_trj_seg_masks.loc[row, col] for col in noise_trj_seg_masks.columns})
+                (pd.DataFrame({col: trj_seg_masks.loc[row, col] for col in trj_seg_masks.columns})
                      .reset_index(drop=True)
-                     .set_index(pd.Series(lengths[row, 0] * [row])) for row in range(noise_trj_seg_masks.shape[0])),
+                     .set_index(pd.Series(lengths[row, 0] * [row])) for row in range(trj_seg_masks.shape[0])),
                 axis=0)
             noise_df.to_pickle(noise_df_path)
             clean_df.to_pickle(clean_df_path)

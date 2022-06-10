@@ -306,7 +306,7 @@ time_convert = np.vectorize(lambda x: datetime.fromtimestamp(x))
 def generate_mask_using_CPD(seg, mask_ratio=.15, mean_mask_length=3):
     n_points = len(seg)
     n_mask = round(n_points * mask_ratio)
-    n_expected_change_point = int(n_mask / mean_mask_length)
+    n_expected_change_point = round(n_mask / mean_mask_length)
 
     # change point detection
     model = "rbf"  # "l2", "l1"

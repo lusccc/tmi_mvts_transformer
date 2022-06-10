@@ -176,6 +176,7 @@ class Options(object):
         delta_t, hour, distance, velocity, acceleration, jerk, heading, heading_change, heading_change_rate
         '''
         self.parser.add_argument('--motion_features', type=str, default='3,4,5,8')
+        self.parser.add_argument('--patience', type=int, default=20)
 
     def parse(self):
 

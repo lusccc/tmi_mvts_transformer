@@ -33,9 +33,11 @@ from datasets.datasplit import split_dataset
 from models.models import model_factory
 from models.loss import get_loss_module
 from optimizers import get_optimizer
+from training_tools import EarlyStopping
 
 # to address Too many open files Pin memory thread exited unexpectedly:
 import torch.multiprocessing
+
 torch.multiprocessing.set_sharing_strategy('file_system')
 
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
@@ -56,15 +58,14 @@ def main(config):
     device = 'cuda' if (torch.cuda.is_available() and config['gpu'] != '-1') else 'cpu'
     if device != 'cuda':
         logger.error("no cuda!! ")
-        exit(-1)
+        # exit(-1)
         device = torch.device(device)
     else:
         device = torch.device(device)
         logger.info("Using device: {}".format(device))
         logger.info("Device index: {}".format(torch.cuda.current_device()))
 
-
-    # *********** 1. Build data ***********
+    # ***********  Build data ***********
     logger.info("Loading and preprocessing data ...")
     data_class = data_factory[config['data_class']]
     my_data = data_class(limit_size=config['limit_size'], config=config)
@@ -224,7 +225,7 @@ def main(config):
                             pin_memory=True,
                             collate_fn=collate_fn)
 
-    # construct WeightedRandomSampler,
+    # not used !!!! construct WeightedRandomSampler,
     # see https://medium.com/analytics-vidhya/augment-your-data-easily-with-pytorch-313f5808fc8b
     train_dataset = dataset_class(my_data, train_indices)
     # train_label_unique, counts = np.unique(train_dataset.labels_df, return_counts=True)
@@ -296,7 +297,8 @@ def main(config):
 
     # *********** Start training ***********
     logger.info('Starting training...')
-
+    early_stop = False
+    early_stopping = EarlyStopping(round(config['patience']/config['val_interval']), verbose=True)
     for epoch in tqdm(range(start_epoch + 1, config["epochs"] + 1), desc='Training Epoch', leave=False):
         mark = epoch if config['save_all'] else 'last'
         epoch_start_time = time.time()
@@ -326,7 +328,15 @@ def main(config):
             metrics_names, metrics_values = zip(*aggr_metrics_val.items())
             metrics.append(list(metrics_values))
 
+            if early_stopping(aggr_metrics_val['loss']).early_stop:
+                early_stop = True
+                logger.warn('early stopping reached')
+
         utils.save_model(os.path.join(config['save_dir'], 'model_{}.pth'.format(mark)), epoch, model, optimizer)
+
+        if early_stop:
+            logger.warn('stopping training...')
+            break
 
         # Learning rate scheduling
         if epoch == config['lr_step'][lr_step]:
@@ -357,7 +367,7 @@ def main(config):
     utils.register_record(config["records_file"], config["initial_timestamp"], config["experiment_name"],
                           best_metrics, aggr_metrics_val, comment=config['comment'])
 
-    logger.info('Best {} was {}. Other metrics: {}'.format(config['key_metric'], best_value, best_metrics))
+    logger.info('Best {} was {}. Other metrics: {}'.format(config['key_metric'], best_value, str(best_metrics)))
     logger.info('All Done!')
 
     total_runtime = time.time() - total_start_time
@@ -371,4 +381,6 @@ if __name__ == '__main__':
     config = setup(args)  # configuration dictionary
     dataset.config = config
     cudnn.benchmark = True
+    #  paper: Torch.manual_seed(3407) is all you need: On the influence of random seeds in deep learning architectures for computer vision
+    torch.manual_seed(3407)
     main(config)
