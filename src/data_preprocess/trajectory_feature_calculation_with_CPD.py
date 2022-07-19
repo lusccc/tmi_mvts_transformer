@@ -12,7 +12,8 @@ from logzero import logger
 from utils import interp_single_seg, interp_trj_seg
 from utils import segment_single_series
 from utils import check_lat_lng, timestamp_to_hour, calc_initial_compass_bearing, \
-    to_categorical, get_consecutive_ones_range_indices, generate_mask_using_CPD
+    to_categorical, get_consecutive_ones_range_indices, generate_mask_using_CPD, \
+    generate_mask_using_CPD_unknown_CP_number, generate_mask_for_trj_using_KDE, generate_mask_for_feature_using_EP
 
 import matplotlib
 
@@ -359,7 +360,9 @@ def do_calc_feature(trj_segs, trj_seg_labels, args):
         # note masks are generated from clean features, using change point detection algorithm
         fs_seg_mask = []
         for fs_seg in cn_multi_feature_seg[:-1]:
-            msk = generate_mask_using_CPD(fs_seg, args.mask_ratio, args.mean_mask_length)
+            msk = generate_mask_for_feature_using_EP(fs_seg, args.mean_mask_length)
+            # msk = generate_mask_using_CPD(fs_seg, args.mask_ratio, args.mean_mask_length)
+            # msk = generate_mask_using_CPD_unknown_CP_number(fs_seg, args.mean_mask_length)
             fs_seg_mask.append(msk)
         fs_seg_masks.append(fs_seg_mask)
 
@@ -369,9 +372,11 @@ def do_calc_feature(trj_segs, trj_seg_labels, args):
         cn_trj_segs.append([cn_trj_seg[:, 0], cn_trj_seg[:, 1]])  # convert to list to avoid numpy broadcast error
         ns_trj_segs.append([ns_trj_seg[:, 0], ns_trj_seg[:, 1]])
 
-        # ************ 6.GENERATE MASK FOR CLEAN TRJ SEG ************
+        # ************ 7.GENERATE MASK FOR CLEAN TRJ SEG ************
         # generate a mask seg by considering lat and lon SIMULTANEOUSLY
-        trj_seg_mask = generate_mask_using_CPD(cn_trj_seg, args.mask_ratio, args.mean_mask_length)
+        # trj_seg_mask = generate_mask_using_CPD(cn_trj_seg, args.mask_ratio, args.mean_mask_length)
+        # trj_seg_mask = generate_mask_using_CPD_unknown_CP_number(cn_trj_seg, args.mean_mask_length)
+        trj_seg_mask = generate_mask_for_trj_using_KDE(cn_trj_seg, args.mean_mask_length)
         trj_seg_masks.append(trj_seg_mask)
 
         # generate a mask seg by considering lat and lon SEPARATELY
@@ -407,8 +412,9 @@ if __name__ == '__main__':
     parser.add_argument('--labels_path', type=str, required=True)
     parser.add_argument('--n_class', type=int, default=5)  # use modes:2,4,6,5,7
     parser.add_argument('--save_dir', type=str, required=True)
-    parser.add_argument('--mean_mask_length', type=float, default=4, )
-    parser.add_argument('--mask_ratio', type=float, default=0.5)
+
+    parser.add_argument('--mean_mask_length', type=float, default=3, )
+    parser.add_argument('--mask_ratio', type=float, default=0.3)
 
     args = parser.parse_args()
 

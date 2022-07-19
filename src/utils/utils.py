@@ -166,7 +166,7 @@ def export_record(filepath, values):
     work_book.save(filepath)
 
 
-def register_record(filepath, timestamp, experiment_name, best_metrics, final_metrics=None, comment=''):
+def register_record(config, filepath, timestamp, experiment_name, best_metrics, final_metrics=None, comment=''):
     """
     Adds the best and final metrics of a given experiment as a record in an excel sheet with other experiment records.
     Creates excel sheet if it doesn't exist.
@@ -183,7 +183,8 @@ def register_record(filepath, timestamp, experiment_name, best_metrics, final_me
     if final_metrics is not None:
         final_metrics_names, final_metrics_values = zip(*final_metrics.items())
         row_values += list(final_metrics_values)
-
+    row_values += [config['data_class'], config['task'], config['input_type'], config['test_only'],
+                   config["output_dir"]]
     if not os.path.exists(filepath):  # Create a records file for the first time
         logger.warning("Records file '{}' does not exist! Creating new file ...".format(filepath))
         directory = os.path.dirname(filepath)
@@ -192,6 +193,7 @@ def register_record(filepath, timestamp, experiment_name, best_metrics, final_me
         header = ["Timestamp", "Name", "Comment"] + ["Best " + m for m in metrics_names]
         if final_metrics is not None:
             header += ["Final " + m for m in final_metrics_names]
+        header += ['DataClass', 'Task', 'DataInputType', 'TestOnly', 'ResultsPath', ]
         book = xlwt.Workbook()  # excel work book
         book = write_table_to_sheet([header, row_values], book, sheet_name="records")
         book.save(filepath)

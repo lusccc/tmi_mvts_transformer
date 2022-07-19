@@ -1,17 +1,17 @@
 dataset='SHL' #
-trj_pre_epoch=200
+trj_pre_epoch=300
 feat_pre_epoch=300
 finetune_epoch=500
 n_patience=20
 
-trj_branch_methods=("denoising_pretrain" "denoising_imputation_pretrain" "denoising_pretrain" "denoising_imputation_pretrain")
-feature_branch_methods=("denoising_pretrain" "denoising_pretrain" "denoising_imputation_pretrain" "denoising_imputation_pretrain")
+trj_branch_methods=("denoising_pretrain" "denoising_imputation_pretrain")
+feature_branch_methods=("denoising_pretrain" "denoising_pretrain")
 
 input_type=("clean" "noise" "mix")
 
-for i in $(seq 3 1 4); do
-  dir_prefix="620afternoon_repeat${i}"
-  for j in $(seq 0 1 3); do
+for i in $(seq 0 1 4); do
+  dir_prefix="627night_repeat${i}"
+  for j in $(seq 0 1 1); do
     tbm=${trj_branch_methods[${j}]}
     fbm=${feature_branch_methods[${j}]}
 
@@ -24,8 +24,11 @@ for i in $(seq 3 1 4); do
     #----------
     #test
     for k in $(seq 0 1 2); do
-      python src/main.py --output_dir test_res --comment "test classification" --name $${dir_prefix}_{dataset}_trj_${tbm}_feat_${fbm}_classification_test --task dual_branch_classification --records_file ${dataset}_test_records.xls --data_class trajectory_with_feature --data_name ${dataset} --val_ratio 0.1 --test_ratio 0.2 --batch_size 600 --pos_encoding learnable --num_workers 16 --key_metric accuracy --feature_branch_hyperparams experiments/tmp/feature_model_hyperparams.json --trajectory_branch_hyperparams experiments/tmp/trajectory_model_hyperparams.json --load_model experiments/tmp/trajectory_with_feature_model_best.pth --input_type ${input_type[${k}]} --test_only testset
+      python src/main.py --output_dir test_res --comment "test classification" --name ${dir_prefix}_${dataset}_trj_${tbm}_feat_${fbm}_classification_test --task dual_branch_classification --records_file ${dataset}_test_records.xls --data_class trajectory_with_feature --data_name ${dataset} --val_ratio 0.1 --test_ratio 0.2 --batch_size 600 --pos_encoding learnable --num_workers 16 --key_metric accuracy --feature_branch_hyperparams experiments/tmp/feature_model_hyperparams.json --trajectory_branch_hyperparams experiments/tmp/trajectory_model_hyperparams.json --load_model experiments/tmp/trajectory_with_feature_model_best.pth --input_type ${input_type[${k}]} --test_only testset
       sleep 5s
     done
   done
 done
+
+
+python src/main.py --output_dir experiments --comment "trj denoising_imputation_pretrain" --name trj_denoising_imputation_pretrain --task denoising_imputation_pretrain --records_file ${dataset}_trj_pre_records.xls --data_class trajectory --data_name ${dataset} --val_ratio 0.1 --test_ratio 0.2 --epochs 500 --lr 0.001 --optimizer RAdam --batch_size 820 --pos_encoding learnable --num_workers 16 --d_model 64 --num_heads 8 --num_layers 4 --dim_feedforward 256 --input_type mix --patience 60

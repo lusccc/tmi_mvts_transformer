@@ -24,7 +24,7 @@ dataset = 'geolife'
 clean_multi_feature_segs = np.load(f'../data/{dataset}_features/clean_multi_feature_segs.npy', allow_pickle=True)
 noise_multi_feature_segs = np.load(f'../data/{dataset}_features/noise_multi_feature_segs.npy', allow_pickle=True)
 labels = np.load(f'../data/{dataset}_features/noise_multi_feature_seg_labels.npy', allow_pickle=True)
-masks = np.load(f'../data/{dataset}_features/noise_trj_seg_masks.npy', allow_pickle=True)
+# masks = np.load(f'../data/{dataset}_features/noise_trj_seg_masks.npy', allow_pickle=True)
 
 # i = 999
 # i = 2134
@@ -39,7 +39,7 @@ j = clean_multi_feature_segs[i][5]
 hc = clean_multi_feature_segs[i][7]
 hcr = noise_multi_feature_segs[i][8]
 time = noise_multi_feature_segs[i][9]
-msk = masks[i] * 100
+# msk = masks[i] * 100
 # plt.plot(d, label='d')
 # plt.plot(v, label='v')
 # plt.plot(a, label='a')
@@ -132,9 +132,9 @@ def generate_mask_using_CPD(feature_seg, mask_ratio=.15, mean_mask_length=3):
     return mask_vec
 
 
-# for seg in [v, a, j, hc, hcr]:
-#     # change point detection
-#     generate_mask_using_CPD( v, )
+for seg in [v, a, j, hc, hcr]:
+    # change point detection
+    generate_mask_using_CPD( v, )
 
 
 

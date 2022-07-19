@@ -209,6 +209,9 @@ def main(config):
             if v is not None:
                 print_str += '{}: {:8f} | '.format(k, v)
         logger.info(print_str)
+        # Export record metrics to a file accumulating records from all experiments
+        utils.register_record(config, config["records_file"], config["initial_timestamp"], config["experiment_name"],
+                              aggr_metrics_test, None, comment=config['comment'])
 
     if config['test_only'] == 'testset':  # Only evaluate and skip training
         evaluate_test()
@@ -298,61 +301,74 @@ def main(config):
     # *********** Start training ***********
     logger.info('Starting training...')
     early_stop = False
-    early_stopping = EarlyStopping(round(config['patience']/config['val_interval']), verbose=True)
-    for epoch in tqdm(range(start_epoch + 1, config["epochs"] + 1), desc='Training Epoch', leave=False):
-        mark = epoch if config['save_all'] else 'last'
-        epoch_start_time = time.time()
-        aggr_metrics_train = trainer.train_epoch(epoch)  # dictionary of aggregate epoch metrics
-        epoch_runtime = time.time() - epoch_start_time
+    monitor_on = 'accuracy' if 'classification' in config['task'] else 'loss'
+    early_stopping = EarlyStopping(round(config['patience']/config['val_interval']), verbose=True, monitor_on=monitor_on)
 
-        print_str = 'Epoch {} Training Summary: '.format(epoch)
-        for k, v in aggr_metrics_train.items():
-            tensorboard_writer.add_scalar('{}/train'.format(k), v, epoch)
-            print_str += '{}: {:8f} | '.format(k, v)
-        logger.info(print_str)
-        logger.info("Epoch runtime: {} hours, {} minutes, {} seconds\n".format(*utils.readable_time(epoch_runtime)))
-        total_epoch_time += epoch_runtime
-        avg_epoch_time = total_epoch_time / (epoch - start_epoch)
-        avg_batch_time = avg_epoch_time / len(train_loader)
-        avg_sample_time = avg_epoch_time / len(train_dataset)
-        logger.info(
-            "Avg epoch train. time: {} hours, {} minutes, {} seconds".format(*utils.readable_time(avg_epoch_time)))
-        logger.info("Avg batch train. time: {} seconds".format(avg_batch_time))
-        logger.info("Avg sample train. time: {} seconds".format(avg_sample_time))
+    with torch.profiler.profile(
+            schedule=torch.profiler.schedule(
+                wait=2,
+                warmup=2,
+                active=6,
+                repeat=1),
+            on_trace_ready=tensorboard_trace_handler('./log'),
+            with_stack=True
+    ) as profiler:
+        for epoch in tqdm(range(start_epoch + 1, config["epochs"] + 1), desc='Training Epoch', leave=False):
+            mark = epoch if config['save_all'] else 'last'
+            epoch_start_time = time.time()
+            aggr_metrics_train = trainer.train_epoch(epoch)  # dictionary of aggregate epoch metrics
+            epoch_runtime = time.time() - epoch_start_time
 
-        # evaluate if first or last epoch or at specified interval
-        if config['val_ratio'] > 0 and \
-                ((epoch == config["epochs"]) or (epoch == start_epoch + 1) or (epoch % config['val_interval'] == 0)):
-            aggr_metrics_val, best_metrics, best_value = validate(val_evaluator, tensorboard_writer, config,
-                                                                  best_metrics, best_value, epoch)
-            metrics_names, metrics_values = zip(*aggr_metrics_val.items())
-            metrics.append(list(metrics_values))
+            print_str = 'Epoch {} Training Summary: '.format(epoch)
+            for k, v in aggr_metrics_train.items():
+                tensorboard_writer.add_scalar('{}/train'.format(k), v, epoch)
+                print_str += '{}: {:8f} | '.format(k, v)
+            logger.info(print_str)
+            logger.info("Epoch runtime: {} hours, {} minutes, {} seconds\n".format(*utils.readable_time(epoch_runtime)))
+            total_epoch_time += epoch_runtime
+            avg_epoch_time = total_epoch_time / (epoch - start_epoch)
+            avg_batch_time = avg_epoch_time / len(train_loader)
+            avg_sample_time = avg_epoch_time / len(train_dataset)
+            logger.info(
+                "Avg epoch train. time: {} hours, {} minutes, {} seconds".format(*utils.readable_time(avg_epoch_time)))
+            logger.info("Avg batch train. time: {} seconds".format(avg_batch_time))
+            logger.info("Avg sample train. time: {} seconds".format(avg_sample_time))
 
-            if early_stopping(aggr_metrics_val['loss']).early_stop:
-                early_stop = True
-                logger.warn('early stopping reached')
+            # evaluate if first or last epoch or at specified interval
+            if config['val_ratio'] > 0 and \
+                    ((epoch == config["epochs"]) or (epoch == start_epoch + 1) or (epoch % config['val_interval'] == 0)):
+                aggr_metrics_val, best_metrics, best_value = validate(val_evaluator, tensorboard_writer, config,
+                                                                      best_metrics, best_value, epoch)
+                metrics_names, metrics_values = zip(*aggr_metrics_val.items())
+                metrics.append(list(metrics_values))
 
-        utils.save_model(os.path.join(config['save_dir'], 'model_{}.pth'.format(mark)), epoch, model, optimizer)
+                if early_stopping(aggr_metrics_val[monitor_on]).early_stop:
+                    early_stop = True
+                    logger.warn('early stopping reached')
 
-        if early_stop:
-            logger.warn('stopping training...')
-            break
+            utils.save_model(os.path.join(config['save_dir'], 'model_{}.pth'.format(mark)), epoch, model, optimizer)
 
-        # Learning rate scheduling
-        if epoch == config['lr_step'][lr_step]:
-            utils.save_model(os.path.join(config['save_dir'], 'model_{}.pth'.format(epoch)), epoch, model,
-                             optimizer)
-            lr = lr * config['lr_factor'][lr_step]
-            if lr_step < len(config['lr_step']) - 1:  # so that this index does not get out of bounds
-                lr_step += 1
-            logger.info('Learning rate updated to: ', lr)
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = lr
+            if early_stop:
+                logger.warn('stopping training...')
+                break
 
-        # Difficulty scheduling
-        if config['harden'] and check_progress(epoch):
-            train_loader.dataset.update()
-            val_loader.dataset.update()
+            # Learning rate scheduling
+            if epoch == config['lr_step'][lr_step]:
+                utils.save_model(os.path.join(config['save_dir'], 'model_{}.pth'.format(epoch)), epoch, model,
+                                 optimizer)
+                lr = lr * config['lr_factor'][lr_step]
+                if lr_step < len(config['lr_step']) - 1:  # so that this index does not get out of bounds
+                    lr_step += 1
+                logger.info('Learning rate updated to: ', lr)
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = lr
+
+            # Difficulty scheduling
+            if config['harden'] and check_progress(epoch):
+                train_loader.dataset.update()
+                val_loader.dataset.update()
+
+            profiler.step()
 
     # *********** Results ***********
     # Export evolution of metrics over epochs
@@ -364,7 +380,7 @@ def main(config):
     book = utils.export_performance_metrics(metrics_filepath, metrics, header, sheet_name="metrics")
 
     # Export record metrics to a file accumulating records from all experiments
-    utils.register_record(config["records_file"], config["initial_timestamp"], config["experiment_name"],
+    utils.register_record(config, config["records_file"], config["initial_timestamp"], config["experiment_name"],
                           best_metrics, aggr_metrics_val, comment=config['comment'])
 
     logger.info('Best {} was {}. Other metrics: {}'.format(config['key_metric'], best_value, str(best_metrics)))
@@ -382,5 +398,5 @@ if __name__ == '__main__':
     dataset.config = config
     cudnn.benchmark = True
     #  paper: Torch.manual_seed(3407) is all you need: On the influence of random seeds in deep learning architectures for computer vision
-    torch.manual_seed(3407)
+    # torch.manual_seed(3407)
     main(config)

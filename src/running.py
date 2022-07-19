@@ -523,7 +523,6 @@ class SupervisedRunner(BaseRunner):
             per_batch['IDs'].append(IDs)
 
             metrics = {"loss": mean_loss}
-            print(i)
             if i % self.print_interval == 0:
                 ending = "" if epoch_num is None else 'Epoch {} '.format(epoch_num)
                 self.print_callback(i, metrics, prefix='Evaluating ' + ending)

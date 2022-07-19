@@ -3,28 +3,20 @@ import torch
 from logzero import logger
 
 class EarlyStopping:
-    """Early stops the training if validation loss doesn't improve after a given patience."""
-    def __init__(self, patience=7, verbose=False, delta=0):
-        """
-        Args:
-            patience (int): How long to wait after last time validation loss improved.
-                            Default: 7
-            verbose (bool): If True, prints a message for each validation loss improvement.
-                            Default: False
-            delta (float): Minimum change in the monitored quantity to qualify as an improvement.
-                            Default: 0
-        """
+    def __init__(self, patience=7, verbose=False, delta=0, monitor_on='loss'):
         self.patience = patience
         self.verbose = verbose
         self.counter = 0
         self.best_score = None
         self.early_stop = False
-        self.val_loss_min = np.Inf
+        self.val_metric_min = np.Inf
         self.delta = delta
+        self.monitor_on = monitor_on
 
-    def __call__(self, val_loss):
+    def __call__(self, val_metric):
+        val_metric = -val_metric if self.monitor_on == 'accuracy' else val_metric
 
-        score = -val_loss
+        score = -val_metric
 
         if self.best_score is None:
             self.best_score = score
@@ -40,9 +32,3 @@ class EarlyStopping:
             self.counter = 0
         return self
 
-    def save_checkpoint(self, val_loss, model):
-        '''Saves model when validation loss decrease.'''
-        if self.verbose:
-            print(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).  Saving model ...')
-        torch.save(model.state_dict(), 'checkpoint.pt')	# 这里会存储迄今最优模型的参数
-        self.val_loss_min = val_loss

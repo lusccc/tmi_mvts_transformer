@@ -9,6 +9,8 @@ import sklearn
 from kats.consts import TimeSeriesData
 from kats.detectors.bocpd import BOCPDetector, BOCPDModelType, NormalKnownParameters
 from scipy.optimize import linear_sum_assignment
+from scipy.stats import gaussian_kde
+from sklearn.neighbors import KernelDensity
 
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -22,6 +24,7 @@ from datetime import datetime
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from logzero import logger
 import ruptures as rpt
+
 
 def scale_any_shape_data(data, scaler):
     data = np.array(data)
@@ -171,7 +174,6 @@ def interp_trj_seg(trj_seg, target_size):
     return interp_trj_seg
 
 
-
 # def padzeros(series, target_size=MAX_SEGMENT_SIZE):
 #     new_series = np.zeros(target_size)
 #     new_series[:len(series)] = series
@@ -302,7 +304,179 @@ def get_consecutive_ones_range_indices(a, min_continuous_len):
     return result
 
 
-time_convert = np.vectorize(lambda x: datetime.fromtimestamp(x))
+
+
+def getExtremePoints(data, typeOfInflexion=None, maxPoints=None):
+    """
+    This method returns the indeces where there is a change in the trend of the input series.
+    typeOfInflexion = None returns all inflexion points, max only maximum values and min
+    only min,
+    """
+    a = np.diff(data)
+    asign = np.sign(a)
+    signchange = ((np.roll(asign, 1) - asign) != 0).astype(int)
+    idx = np.where(signchange == 1)[0]
+
+    if len(idx) == 0:
+       return None
+
+    try:
+        if typeOfInflexion == 'max' and data[idx[0]] < data[idx[1]]:
+            idx = idx[1:][::2]
+
+        elif typeOfInflexion == 'min' and data[idx[0]] > data[idx[1]]:
+            idx = idx[1:][::2]
+        elif typeOfInflexion is not None:
+            idx = idx[::2]
+    except:
+        print('error')
+
+    # sort ids by min value
+    if 0 in idx:
+        idx = np.delete(idx, 0)
+    if (len(data) - 1) in idx:
+        idx = np.delete(idx, len(data) - 1)
+    idx = idx[np.argsort(data[idx])]
+    # If we have maxpoints we want to make sure the timeseries has a cutpoint
+    # in each segment, not all on a small interval
+    if maxPoints is not None:
+        idx = idx[:maxPoints]
+        if len(idx) < maxPoints:
+            return (np.arange(maxPoints) + 1) * (len(data) // (maxPoints + 1))
+
+    return idx
+
+
+class GaussianKde(gaussian_kde):
+    """
+    https://stackoverflow.com/questions/63812970/scipy-gaussian-kde-matrix-is-not-positive-definite
+    Drop-in replacement for gaussian_kde that adds the class attribute EPSILON
+    to the covmat eigenvalues, to prevent exceptions due to numerical error.
+    """
+
+    EPSILON = 1e-10  # adjust this at will
+
+    def _compute_covariance(self):
+        """Computes the covariance matrix for each Gaussian kernel using
+        covariance_factor().
+        """
+        self.factor = self.covariance_factor()
+        # Cache covariance and inverse covariance of the data
+        if not hasattr(self, '_data_inv_cov'):
+            self._data_covariance = np.atleast_2d(np.cov(self.dataset, rowvar=1,
+                                                         bias=False,
+                                                         aweights=self.weights))
+            # we're going the easy way here
+            self._data_covariance += self.EPSILON * np.eye(
+                len(self._data_covariance))
+            self._data_inv_cov = np.linalg.inv(self._data_covariance)
+
+        self.covariance = self._data_covariance * self.factor ** 2
+        self.inv_cov = self._data_inv_cov / self.factor ** 2
+        L = np.linalg.cholesky(self.covariance * 2 * np.pi)
+        self._norm_factor = 2 * np.log(np.diag(L)).sum()  # needed for scipy 1.5.2
+        self.log_det = 2 * np.log(np.diag(L)).sum()  # changed var name on 1.6.2
+
+
+def generate_mask_for_trj_using_KDE(trj_seg, mean_mask_length=2):
+    n_points = len(trj_seg)
+    x = trj_seg[:, 0]
+    y = trj_seg[:, 1]
+    # Create meshgrid
+    # deltaX = (max(x) - min(x)) / 10
+    # deltaY = (max(y) - min(y)) / 10
+    #
+    # xmin = min(x) - deltaX
+    # xmax = max(x) + deltaX
+    #
+    # ymin = min(y) - deltaY
+    # ymax = max(y) + deltaY
+    # xx, yy = np.mgrid[xmin:xmax:100j, ymin:ymax:100j]
+
+    # Fit a gaussian kernel
+    # positions = np.vstack([xx.ravel(), yy.ravel()])
+    values = np.vstack([x, y])
+    try:
+        kernel = GaussianKde(values)
+    except:
+        np.save('error_kde.npy', values)
+        print('error')
+    kvt = kernel(values).T  # density on x,y
+
+    # Higher density points index
+    idx_hd = getExtremePoints(kvt, typeOfInflexion='max')
+
+    if idx_hd is None:
+        logger.warning('no ExtremePoints ! mask all points!')
+        mask_vec = np.zeros(n_points)
+    else:
+        mask_vec = np.ones(n_points)
+        for idx in idx_hd:
+            # logger.info(idx)
+            # check beginning
+            if int(idx - int(mean_mask_length / 2)) <= 0:
+                mask_vec[:mean_mask_length] = 0
+            # check end
+            elif int(idx + int(mean_mask_length / 2)) >= n_points:
+                mask_vec[-mean_mask_length:] = 0
+            else:
+                mask_vec[idx - int(mean_mask_length / 2):idx - int(mean_mask_length / 2) + mean_mask_length] = 0
+    return mask_vec
+
+
+def generate_mask_for_feature_using_EP(feature_seg, mean_mask_length=2):
+    """
+    EP: ExtremePoints
+    """
+    n_points = len(feature_seg)
+    idx_ep = getExtremePoints(feature_seg, typeOfInflexion='max')
+    if idx_ep is None:
+        logger.warning('no ExtremePoints ! mask all points!')
+        mask_vec = np.zeros(n_points)
+    else:
+        mask_vec = np.ones(n_points)
+        for idx in idx_ep:
+            # logger.info(idx)
+            # check beginning
+            if int(idx - int(mean_mask_length / 2)) <= 0:
+                mask_vec[:mean_mask_length] = 0
+            # check end
+            elif int(idx + int(mean_mask_length / 2)) >= n_points:
+                mask_vec[-mean_mask_length:] = 0
+            else:
+                mask_vec[idx - int(mean_mask_length / 2):idx - int(mean_mask_length / 2) + mean_mask_length] = 0
+    return mask_vec
+
+def generate_mask_using_CPD_unknown_CP_number(feature_seg, mean_mask_length=2):
+    n_points = len(feature_seg)
+
+    # change point detection
+    model = "rbf"  # "l2", "l1"
+    algo = rpt.KernelCPD(kernel=model, min_size=3, ).fit(feature_seg)
+    change_points = algo.predict(pen=1)
+    # logger.info(f'size: {len(change_points)},  change_points: {change_points}')
+    n_cp = len(change_points)
+    if n_cp > 5:
+        # 0s means mask, 1s means not affected
+        mask_vec = np.ones(n_points)
+        for cp in change_points:
+            # logger.info(cp)
+            # check beginning
+            if int(cp - int(mean_mask_length / 2)) <= 0:
+                mask_vec[:mean_mask_length] = 0
+            # check end
+            elif int(cp + int(mean_mask_length / 2)) >= n_points:
+                mask_vec[-mean_mask_length:] = 0
+            else:
+                mask_vec[cp - int(mean_mask_length / 2):cp - int(mean_mask_length / 2) + mean_mask_length] = 0
+    else:
+        # too less CPs, mask all points, which means the loss function in training will be imposed on all points
+        # 0s means mask, 1s means not affected
+        logger.info('too less CPs!!!  mask all points!')
+        mask_vec = np.zeros(n_points)
+    return mask_vec
+
+
 def generate_mask_using_CPD(seg, mask_ratio=.15, mean_mask_length=3):
     n_points = len(seg)
     n_mask = round(n_points * mask_ratio)
@@ -330,10 +504,14 @@ def generate_mask_using_CPD(seg, mask_ratio=.15, mean_mask_length=3):
 
     return mask_vec
 
+
 # https://github.com/facebook/Ax/issues/417#issuecomment-718002390
 # to make BOCPDetector warning disappear
 warnings.filterwarnings("ignore", category=UserWarning)
 # time_convert = np.vectorize(lambda x: datetime.fromtimestamp(x))
+time_convert = np.vectorize(lambda x: datetime.fromtimestamp(x))
+
+
 def get_mask_with_BOCPDetector(time_seg, feature_seg, mask_ratio=.15, mean_mask_length=3):
     """
     deprecated!!!!!
@@ -344,7 +522,7 @@ def get_mask_with_BOCPDetector(time_seg, feature_seg, mask_ratio=.15, mean_mask_
     n_expected_change_point = int(n_mask / mean_mask_length)
     ts_df = pd.DataFrame({'time': time_convert(time_seg), 'y': feature_seg})
     ts = TimeSeriesData(ts_df)
-    detector = BOCPDetector(ts) # https://github.com/facebookresearch/Kats/blob/main/tutorials/kats_202_detection.ipynb
+    detector = BOCPDetector(ts)  # https://github.com/facebookresearch/Kats/blob/main/tutorials/kats_202_detection.ipynb
 
     min_threshold = .11
     lr = .1
@@ -355,7 +533,7 @@ def get_mask_with_BOCPDetector(time_seg, feature_seg, mask_ratio=.15, mean_mask_
         # logger.info(f'curr_threshold:{curr_threshold}')
         change_points = detector.detector(
             model=BOCPDModelType.NORMAL_KNOWN_MODEL, changepoint_prior=mask_ratio, threshold=curr_threshold,
-            model_parameters=NormalKnownParameters(empirical=False,)
+            model_parameters=NormalKnownParameters(empirical=False, )
         )
 
         curr_threshold -= lr
@@ -373,12 +551,11 @@ def get_mask_with_BOCPDetector(time_seg, feature_seg, mask_ratio=.15, mean_mask_
         # logger.info(cp_idx)
         # check beginning
         if int(cp_idx - int(mean_mask_length / 2)) <= 0:
-            mask_vec[:mean_mask_length] = 0 # assign mask at beginning
+            mask_vec[:mean_mask_length] = 0  # assign mask at beginning
         # check end
         elif int(cp_idx + int(mean_mask_length / 2)) >= n_points:
-            mask_vec[-mean_mask_length:] = 0 #  assign mask at end
+            mask_vec[-mean_mask_length:] = 0  # assign mask at end
         else:
             mask_vec[cp_idx - int(mean_mask_length / 2):cp_idx - int(mean_mask_length / 2) + mean_mask_length] = 0
 
     return mask_vec
-
