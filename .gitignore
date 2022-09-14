@@ -2,6 +2,8 @@
 logs/*
 .idea/
 data/
+history_exps/
+test_res/
 experiments/
 *.npy
 *.npz

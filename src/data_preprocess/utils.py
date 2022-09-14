@@ -6,10 +6,13 @@ import matplotlib
 import numpy as np
 import pandas as pd
 import sklearn
+from KDEpy import FFTKDE
 from kats.consts import TimeSeriesData
 from kats.detectors.bocpd import BOCPDetector, BOCPDModelType, NormalKnownParameters
 from scipy.optimize import linear_sum_assignment
+from scipy.spatial import distance
 from scipy.stats import gaussian_kde
+from skimage.feature import peak_local_max
 from sklearn.neighbors import KernelDensity
 
 matplotlib.use('Agg')
@@ -21,7 +24,7 @@ import tables as tb
 
 import time
 from datetime import datetime
-from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.preprocessing import StandardScaler, LabelEncoder, MinMaxScaler
 from logzero import logger
 import ruptures as rpt
 
@@ -304,10 +307,9 @@ def get_consecutive_ones_range_indices(a, min_continuous_len):
     return result
 
 
-
-
 def getExtremePoints(data, typeOfInflexion=None, maxPoints=None):
     """
+    https://towardsdatascience.com/modality-tests-and-kernel-density-estimations-3f349bb9e595
     This method returns the indeces where there is a change in the trend of the input series.
     typeOfInflexion = None returns all inflexion points, max only maximum values and min
     only min,
@@ -318,7 +320,7 @@ def getExtremePoints(data, typeOfInflexion=None, maxPoints=None):
     idx = np.where(signchange == 1)[0]
 
     if len(idx) == 0:
-       return None
+        return None
 
     try:
         if typeOfInflexion == 'max' and data[idx[0]] < data[idx[1]]:
@@ -378,6 +380,121 @@ class GaussianKde(gaussian_kde):
         self.log_det = 2 * np.log(np.diag(L)).sum()  # changed var name on 1.6.2
 
 
+def generate_mask_for_trj_using_KDE_RPD(trj_seg, mean_mask_length=2):
+    n_points = len(trj_seg)
+    x = trj_seg[:, 0]
+    y = trj_seg[:, 1]
+
+    # transform trj to same scale as the grid of kde
+    target_scale = 100  # 0~100
+    grid_size = 100
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    x_s = scaler.fit_transform(x.reshape(-1, 1)).squeeze() * target_scale
+    y_s = scaler.fit_transform(y.reshape(-1, 1)).squeeze() * target_scale
+
+    # Boundary correction using mirroring, then do kde
+    # https://kdepy.readthedocs.io/en/latest/examples.html#boundary-correction-using-mirroring
+    data = np.vstack([x_s, y_s]).T  # use scaled data!!!.
+    x_s_mir = np.concatenate([(2 * x_s.min() - x_s), x_s, (2 * x_s.max() - x_s)])
+    y_s_mir = np.concatenate([(2 * y_s.min() - y_s), y_s, (2 * y_s.max() - y_s)])
+    data_mir = np.vstack([x_s_mir, y_s_mir]).T  # use scaled data!!!.
+    grid_size_mir = grid_size * 3  # mirrored, hence the grid_size to do kde is 3 times
+
+    # fix grid error!! because i found that if we do not manually generate grid using np.linspace, the peak values in
+    # kde detected is lagged!!
+    # https://github.com/tommyod/KDEpy/issues/15 Create 2D grid
+    kde_grid_x = np.linspace(data_mir.min() - 1, data_mir.max() + 1, grid_size_mir)  # "-1, +1" is used to ensure range
+    kde_grid_y = np.linspace(data_mir.min() - 1, data_mir.max() + 1, grid_size_mir)
+    kde_grid = np.stack(np.meshgrid(kde_grid_x, kde_grid_y), -1).reshape(-1, 2)
+    kde_grid[:, [0, 1]] = kde_grid[:, [1, 0]]  # Swap indices
+
+    # FFTKDE
+    fit = FFTKDE(bw=1, kernel='epa').fit(data_mir)
+    z_kde = fit.evaluate(kde_grid)
+    z_kde_grid = z_kde.reshape(grid_size_mir, grid_size_mir).T
+
+    # find_peak_repeatedly
+    pk_coords_mir = find_peak_repeatedly(z_kde_grid, min_peaks=3 * 4, max_peaks=3 * 16, threshold_rel=0.1,
+                                         min_distance=2)
+    # get peak index
+    pk_coords_mir_correct = np.vstack(
+        [pk_coords_mir[:, 1], pk_coords_mir[:, 0]]).T  # make columns order correct to calculate distance later
+
+    # take out middle part, find the close one to pk_coord in data
+    pk_coords_unmir_correct = []
+    for pk in pk_coords_mir_correct:
+        x, y = pk[0], pk[1]
+        if x in range(grid_size, 2 * grid_size) and y in range(grid_size, 2 * grid_size):
+            pk_coords_unmir_correct.append(pk)
+    pk_coords_unmir_correct = np.array(pk_coords_unmir_correct) - grid_size
+
+    # match closet points in trj
+    pk_point_idx = []
+    for pk_coord in pk_coords_unmir_correct:
+        min_dist = math.inf
+        min_dist_point_idx = -1  # idx
+        for i, point in enumerate(data):
+            # if i not in range(grid_size, 2*grid_size):
+            #     continue
+            dist = distance.euclidean(point, pk_coord)
+            if dist < min_dist:
+                min_dist = dist
+                min_dist_point = point
+                min_dist_point_idx = i
+        pk_point_idx.append(min_dist_point_idx)
+
+    # generate masks
+    mask_vec = np.ones(n_points)
+    for idx in pk_point_idx:
+        # logger.info(idx)
+        # check beginning
+        if int(idx - int(mean_mask_length / 2)) <= 0:
+            mask_vec[:mean_mask_length] = 0
+        # check end
+        elif int(idx + int(mean_mask_length / 2)) >= n_points:
+            mask_vec[-mean_mask_length:] = 0
+        else:
+            mask_vec[idx - int(mean_mask_length / 2):idx - int(mean_mask_length / 2) + mean_mask_length] = 0
+
+    return mask_vec
+
+
+def find_peak_repeatedly(data, min_peaks=3 * 4, max_peaks=3 * 9, threshold_rel=0., min_distance=2):
+    """
+    To avoid the situation that a very high peak occurred lead to the rest peaks cannot be identified,
+    hence we repeatedly find peaks by making already identified peaks equal to zero until the `min_peaks` is met.
+    Besides, the `max_peaks` is also required, if peaks more than `max_peaks` is detected, we only need the former highest
+    `max_peaks`.
+
+    Returns: indices of peaks
+
+    """
+    data_cp = np.copy(data)
+
+    results = None
+    n_pks = 0
+    while n_pks <= min_peaks:
+        pks = peak_local_max(data_cp, exclude_border=False, threshold_rel=threshold_rel, min_distance=min_distance)
+        # print(n_pks, pks)
+        if results is None:
+            results = pks
+        else:
+            results = np.concatenate([results, pks])
+        n_pks += len(pks)
+        # results += pks
+        for p in pks:
+            data_cp[p[0], p[1]] = 0
+
+    if n_pks > max_peaks:
+        # print([coord for coord in results])
+        pk_vals = np.array([[*coord, data[coord[0], coord[1]]] for coord in results])
+        # sort by peak val
+        pk_vals = pk_vals[pk_vals[:, 2].argsort()][::-1]
+        results = pk_vals[:max_peaks, [0, 1]].astype(int)
+    return np.array(results)
+
+
+@DeprecationWarning
 def generate_mask_for_trj_using_KDE(trj_seg, mean_mask_length=2):
     n_points = len(trj_seg)
     x = trj_seg[:, 0]
@@ -446,6 +563,7 @@ def generate_mask_for_feature_using_EP(feature_seg, mean_mask_length=2):
             else:
                 mask_vec[idx - int(mean_mask_length / 2):idx - int(mean_mask_length / 2) + mean_mask_length] = 0
     return mask_vec
+
 
 def generate_mask_using_CPD_unknown_CP_number(feature_seg, mean_mask_length=2):
     n_points = len(feature_seg)

@@ -6,3 +6,7 @@ xlwt
 xlutils
 tabulate
 pandas
+tqdm
+tensorboard
+matplotlib
+conda install pytorch torchvision cudatoolkit=11.1 -c pytorch -c conda-forge

@@ -13,7 +13,8 @@ from utils import interp_single_seg, interp_trj_seg
 from utils import segment_single_series
 from utils import check_lat_lng, timestamp_to_hour, calc_initial_compass_bearing, \
     to_categorical, get_consecutive_ones_range_indices, generate_mask_using_CPD, \
-    generate_mask_using_CPD_unknown_CP_number, generate_mask_for_trj_using_KDE, generate_mask_for_feature_using_EP
+    generate_mask_using_CPD_unknown_CP_number, generate_mask_for_trj_using_KDE, generate_mask_for_feature_using_EP, \
+    generate_mask_for_trj_using_KDE_RPD
 
 import matplotlib
 
@@ -376,7 +377,8 @@ def do_calc_feature(trj_segs, trj_seg_labels, args):
         # generate a mask seg by considering lat and lon SIMULTANEOUSLY
         # trj_seg_mask = generate_mask_using_CPD(cn_trj_seg, args.mask_ratio, args.mean_mask_length)
         # trj_seg_mask = generate_mask_using_CPD_unknown_CP_number(cn_trj_seg, args.mean_mask_length)
-        trj_seg_mask = generate_mask_for_trj_using_KDE(cn_trj_seg, args.mean_mask_length)
+        # trj_seg_mask = generate_mask_for_trj_using_KDE(cn_trj_seg, args.mean_mask_length)
+        trj_seg_mask = generate_mask_for_trj_using_KDE_RPD(cn_trj_seg, args.mean_mask_length)
         trj_seg_masks.append(trj_seg_mask)
 
         # generate a mask seg by considering lat and lon SEPARATELY

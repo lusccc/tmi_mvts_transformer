@@ -29,7 +29,8 @@ def model_factory(config, data):
         return DualTSTransformerEncoderClassifier(utils.load_model_hyperparams(config['trajectory_branch_hyperparams']),
                                                   utils.load_model_hyperparams(config['feature_branch_hyperparams']),
                                                   len(data.feature_data.class_names), dropout=config['dropout'],
-                                                  activation=config['activation'])
+                                                  activation=config['activation'], emb1_size=config['emb_size'],
+                                                  emb2_size=config['emb_size'])
     if task == 'trajectory_branch_classification':
         return TSTransformerEncoderClassifier(**utils.load_model_hyperparams(config['trajectory_branch_hyperparams']),
                                               num_classes=len(data.class_names))

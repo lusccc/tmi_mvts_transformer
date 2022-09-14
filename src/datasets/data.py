@@ -316,4 +316,5 @@ data_factory = {
 }
 
 if __name__ == '__main__':
+    TrajectoryWithFeatureData()
     print()

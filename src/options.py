@@ -177,6 +177,7 @@ class Options(object):
         '''
         self.parser.add_argument('--motion_features', type=str, default='3,4,5,8')
         self.parser.add_argument('--patience', type=int, default=60)
+        self.parser.add_argument('--emb_size', type=int, default=64)
 
     def parse(self):
 

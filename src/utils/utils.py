@@ -95,6 +95,12 @@ def save_model_hyperparams(config, hyperparams):
     with open(os.path.join(output_dir, f"{config['task']}_model_hyperparams.json"), 'w') as fp:
         json.dump(hyperparams, fp, indent=4, sort_keys=True)
 
+    try:
+        with open(os.path.join('experiments', 'tmp', config['data_class'] + '_model_hyperparams.json'), 'w') as fp:
+            json.dump(hyperparams, fp, indent=4, sort_keys=True)
+    except:
+        logger.error('no tmp dir!')
+
 
 def load_model_hyperparams(file_path):
     with open(file_path) as hp:
