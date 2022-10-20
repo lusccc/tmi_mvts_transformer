@@ -1,6 +1,7 @@
 import argparse
 import os
 import pathlib
+import pickle
 
 import logzero
 import numpy as np
@@ -13,12 +14,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 from sklearn.tree import DecisionTreeClassifier
 
-
 from logzero import logger
-from params import modes_to_use, N_CLASS, MAX_SEGMENT_SIZE, FEATURES_SET_1
-
-pathlib.Path(os.environ['RES_PATH']).mkdir(parents=True, exist_ok=True)
-logzero.logfile(os.path.join(os.environ['RES_PATH'], 'log.txt'), backupCount=3)
 
 
 def calc_handcrafted_features(feature_segments):
@@ -27,6 +23,12 @@ def calc_handcrafted_features(feature_segments):
     VS = 3.4  # Stop rate threshold
     VR = 0.26  # VCR threshold
     for single_segment in feature_segments:
+        '''
+        new:
+        0        1     2         3         4             5     6        7               8 
+        delta_t, hour, distance, velocity, acceleration, jerk, heading, heading_change, heading_change_rate
+        '''
+        # old:
         # 0        1     2  3  4  5  6   7    8  9
         # delta_t, hour, d, v, a, h, hc, hcr, s, tn
         delta_ts = single_segment[:, 0]
@@ -75,45 +77,73 @@ def calc_handcrafted_features(feature_segments):
     return np.array(handcrafted_features_segments)
 
 
-def svc_classification(dataset, x_handcrafted_train, x_handcrafted_test, y_train, y_test):
+def svc_classification(dataset, x_handcrafted_train, x_handcrafted_test, y_train, y_test, test_only=False):
+
     clf = make_pipeline(StandardScaler(), SVC(gamma='auto'))
-    # for svc, y is not one-hot encoding
-    y_train_ = np.argmax(y_train, axis=1)
-    clf.fit(x_handcrafted_train, y_train_)
+    if test_only:
+        logger.warning('test only!')
+        with open(f'svc.pkl', 'rb') as f:
+            clf = pickle.load(f)
+    else:
+        # for svc, y is not one-hot encoding
+        clf.fit(x_handcrafted_train, y_train)
+        with open(f'svc.pkl', 'wb') as f:
+            pickle.dump(clf, f)
+
     y_pred = clf.predict(x_handcrafted_test)
     show_confusion_matrix(y_pred, y_test, 'SVC', dataset)
 
 
-def ml_algorithms(dataset, x_handcrafted_train, x_handcrafted_test, y_train, y_test):
+def ml_algorithms(dataset, x_handcrafted_train, x_handcrafted_test, y_train, y_test, test_only=False):
     ml_models = [RandomForestClassifier(), KNeighborsClassifier(), MLPClassifier(), DecisionTreeClassifier()]
     for i, model in enumerate(ml_models):
         print('$$$$ {} $$$$'.format(i))
-        model.fit(x_handcrafted_train, y_train)
+        if test_only:
+            logger.warning('test only!')
+            with open(f'{model.__class__.__name__}.pkl', 'rb') as f:
+                model = pickle.load(f)
+        else:
+            model.fit(x_handcrafted_train, y_train)
+            with open(f'{model.__class__.__name__}.pkl', 'wb') as f:
+                pickle.dump(model, f)
         y_pred = model.predict(x_handcrafted_test)
-        y_pred = np.argmax(y_pred, axis=1)
+        # y_pred = np.argmax(y_pred, axis=1)
+        y_test = np.squeeze(y_test)
         show_confusion_matrix(y_pred, y_test, model.__class__.__name__, dataset)
 
 
 def show_confusion_matrix(y_pred, y_test, algorithm_name, dataset_name):
-    print('\n###########')
-    y_true = np.argmax(y_test, axis=1)
-    cm = confusion_matrix(y_true, y_pred, labels=modes_to_use)
-    logger.info(cm)
-    re = classification_report(y_true, y_pred, target_names=['walk', 'bike', 'bus', 'driving', 'train/subway'],
+    print(f'\n###########{algorithm_name}')
+    cm = confusion_matrix(y_test, y_pred, labels=[0, 1, 2, 3, 4])
+    print(cm)
+    re = classification_report(y_test, y_pred, target_names=['walk', 'bike', 'bus', 'driving', 'train/subway'],
                                digits=5)
-    logger.info(re)
-    with open(os.path.join(os.environ['RES_PATH'], f'{dataset_name}_{algorithm_name}_classification_results.txt'), 'a') as f:
-        print(cm, file=f)
-        print(re, file=f)
+    print(re)
 
 
 def load_data(dataset_name, data_type):
     dataset_name = dataset_name
     data_type = data_type
-    multi_feature_segs = np.load(f'./data/{dataset_name}_features/multi_feature_segs_{data_type}_all_features_normalized.npy')
+    multi_feature_segs = np.load(
+        f'./data/{dataset_name}_features/multi_feature_segs_{data_type}_all_features_normalized.npy')
     multi_feature_segs = np.swapaxes(multi_feature_segs, 1, 2)
     labels = np.load(f'./data/{dataset_name}_features/multi_feature_seg_labels_{data_type}.npy')
     return multi_feature_segs, labels
+
+
+def run_ml_classification(dataset, test_loader, train_loader, test_only=False):
+    # should be trj data
+    X_train = np.vstack([batch[0].numpy() for batch in train_loader])
+    X_train = np.swapaxes(X_train, 1, 2)
+    y_train = np.vstack([batch[1].numpy() for batch in train_loader])
+    X_test = np.vstack([batch[0].numpy() for batch in test_loader])
+    X_test = np.swapaxes(X_test, 1, 2)
+    y_test = np.vstack([batch[1].numpy() for batch in test_loader])
+
+    x_handcrafted_train = calc_handcrafted_features(X_train)
+    x_handcrafted_test = calc_handcrafted_features(X_test)
+    ml_algorithms(dataset, x_handcrafted_train, x_handcrafted_test, y_train, y_test, test_only)
+    svc_classification(dataset, x_handcrafted_train, x_handcrafted_test, y_train, y_test, test_only)
 
 
 if __name__ == '__main__':

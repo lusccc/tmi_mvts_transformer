@@ -74,7 +74,7 @@ if __name__ == '__main__':
     '''
      mode index from SHL is differ from geolife, will be transform to be same as geolife
     '''
-    parser.add_argument('--use_modes', type=str, default='2,4,6,5,7')
+    parser.add_argument('--use_modes', type=str, default='2,4,6,5,7') # TODO 8 actually not used!
     parser.add_argument('--data_dir', type=str, default='/mnt/xs/DATASET/SHLDataset_User1Hips_v1/release/User1')
     parser.add_argument('--save_dir', type=str, default='./data/SHL_extracted/')
 

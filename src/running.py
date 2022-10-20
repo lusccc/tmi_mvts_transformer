@@ -51,6 +51,8 @@ def pipeline_factory(config):
         return GenericClassificationDataset, collate_generic_superv, SupervisedRunner
     if "cnn_classification" in task or "lstm_classification" in task:
         return GenericClassificationDataset, collate_generic_superv, SupervisedRunner
+    if task == 'ml_classification':
+        return GenericClassificationDataset, collate_generic_superv, SupervisedRunner
     else:
         raise NotImplementedError("Task '{}' not implemented".format(task))
 
@@ -501,6 +503,7 @@ class SupervisedRunner(BaseRunner):
         total_samples = 0  # total samples in epoch
 
         per_batch = {'target_masks': [], 'targets': [], 'predictions': [], 'metrics': [], 'IDs': []}
+        eval_start_time = time.time()
         for i, batch in enumerate(self.dataloader):
             for j, e in enumerate(batch):
                 if isinstance(e, Tensor):
@@ -529,7 +532,7 @@ class SupervisedRunner(BaseRunner):
 
             total_samples += len(loss)
             epoch_loss += batch_loss  # add total loss of batch
-
+        logger.info(f'eval time: {time.time() - eval_start_time} s')
         epoch_loss = epoch_loss / total_samples  # average loss per element for whole epoch
         self.epoch_metrics['epoch'] = epoch_num
         self.epoch_metrics['loss'] = epoch_loss

@@ -23,6 +23,7 @@ import torch
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.utils.tensorboard import SummaryWriter
 
+from ML_comparison_hand_crafted import run_ml_classification
 # Project modules
 from datasets import dataset
 from options import Options
@@ -133,74 +134,67 @@ def main(config):
         if len(test_indices):
             df.loc[test_indices] = normalizer.normalize(df.loc[test_indices])
 
-    # *********** Create model ***********
-    logger.info("Creating model ...")
-    model = model_factory(config, my_data)
+    # *********** Create DL model ***********
+    if config['task'] != 'ml_classification':
+        logger.info("Creating model ...")
+        model = model_factory(config, my_data)
 
-    if config['freeze']:
-        for name, param in model.named_parameters():
-            if 'output_layer' in name:
-                logger.info(f'set layer {name} requires_grad = True')
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
+        if config['freeze']:
+            for name, param in model.named_parameters():
+                if 'output_layer' in name:
+                    logger.info(f'set layer {name} requires_grad = True')
+                    param.requires_grad = True
+                else:
+                    param.requires_grad = False
 
-    logger.info("Model:\n{}".format(model))
-    logger.info("Total number of parameters: {}".format(utils.count_parameters(model)))
-    logger.info("Trainable parameters: {}".format(utils.count_parameters(model, trainable=True)))
+        logger.info("Model:\n{}".format(model))
+        logger.info("Total number of parameters: {}".format(utils.count_parameters(model)))
+        logger.info("Trainable parameters: {}".format(utils.count_parameters(model, trainable=True)))
 
-    # Initialize optimizer
-    if config['global_reg']:
-        weight_decay = config['l2_reg']
-        output_reg = None
-    else:
-        weight_decay = 0
-        output_reg = config['l2_reg']
+        # Initialize optimizer
+        if config['global_reg']:
+            weight_decay = config['l2_reg']
+            output_reg = None
+        else:
+            weight_decay = 0
+            output_reg = config['l2_reg']
 
-    optim_class = get_optimizer(config['optimizer'])
-    optimizer = optim_class(model.parameters(), lr=config['lr'], weight_decay=weight_decay)
+        optim_class = get_optimizer(config['optimizer'])
+        optimizer = optim_class(model.parameters(), lr=config['lr'], weight_decay=weight_decay)
 
-    start_epoch = 0
-    lr_step = 0  # current step index of `lr_step`
-    lr = config['lr']  # current learning step
-    # Load model and optimizer state
-    if config['task'] == 'dual_branch_classification':
-        if config['load_trajectory_branch']:
-            model.trajectory_branch, _, __ = utils.load_model(model.trajectory_branch,
-                                                              config['load_trajectory_branch'], optimizer,
-                                                              config['resume'],
-                                                              config['change_output'],
-                                                              config['lr'],
-                                                              config['lr_step'],
-                                                              config['lr_factor'])
-        if config['load_feature_branch']:
-            model.feature_branch, _, __ = utils.load_model(model.feature_branch,
-                                                           config['load_feature_branch'], optimizer,
-                                                           config['resume'],
-                                                           config['change_output'],
-                                                           config['lr'],
-                                                           config['lr_step'],
-                                                           config['lr_factor'])
+        start_epoch = 0
+        lr_step = 0  # current step index of `lr_step`
+        lr = config['lr']  # current learning step
+        # Load model and optimizer state
+        if config['task'] == 'dual_branch_classification':
+            if config['load_trajectory_branch']:
+                model.trajectory_branch, _, __ = utils.load_model(model.trajectory_branch,
+                                                                  config['load_trajectory_branch'], optimizer,
+                                                                  config['resume'],
+                                                                  config['change_output'],
+                                                                  config['lr'],
+                                                                  config['lr_step'],
+                                                                  config['lr_factor'])
+            if config['load_feature_branch']:
+                model.feature_branch, _, __ = utils.load_model(model.feature_branch,
+                                                               config['load_feature_branch'], optimizer,
+                                                               config['resume'],
+                                                               config['change_output'],
+                                                               config['lr'],
+                                                               config['lr_step'],
+                                                               config['lr_factor'])
 
-    if config['load_model']:
-        model, optimizer, start_epoch = utils.load_model(model, config['load_model'], optimizer, config['resume'],
-                                                         config['change_output'],
-                                                         config['lr'],
-                                                         config['lr_step'],
-                                                         config['lr_factor'])
-    model.to(device)
-    loss_module = get_loss_module(config)
+        if config['load_model']:
+            model, optimizer, start_epoch = utils.load_model(model, config['load_model'], optimizer, config['resume'],
+                                                             config['change_output'],
+                                                             config['lr'],
+                                                             config['lr_step'],
+                                                             config['lr_factor'])
+        model.to(device)
+        loss_module = get_loss_module(config)
 
     # *********** Only evaluate ***********
     def evaluate_test():
-        dataset_class, collate_fn, runner_class = pipeline_factory(config)
-        test_dataset = dataset_class(test_data, test_indices)
-        test_loader = DataLoader(dataset=test_dataset,
-                                 batch_size=config['batch_size'],
-                                 shuffle=False,
-                                 num_workers=config['num_workers'],
-                                 pin_memory=True,
-                                 collate_fn=lambda x: collate_fn(x, ))
         test_evaluator = runner_class(model, test_loader, device, loss_module,
                                       print_interval=config['print_interval'], console=config['console'])
         aggr_metrics_test, per_batch_test = test_evaluator.evaluate(keep_all=True)
@@ -213,9 +207,19 @@ def main(config):
         utils.register_record(config, config["records_file"], config["initial_timestamp"], config["experiment_name"],
                               aggr_metrics_test, None, comment=config['comment'])
 
-    if config['test_only'] == 'testset':  # Only evaluate and skip training
-        evaluate_test()
-        return
+    if config['test_only'] == 'testset' or config['task'] == 'ml_classification':
+        dataset_class, collate_fn, runner_class = pipeline_factory(config)
+        test_dataset = dataset_class(test_data, test_indices)
+        test_loader = DataLoader(dataset=test_dataset,
+                                 batch_size=config['batch_size'],
+                                 shuffle=False,
+                                 num_workers=config['num_workers'],
+                                 pin_memory=True,
+                                 collate_fn=lambda x: collate_fn(x, ))
+        if config['test_only'] == 'testset' and config['task'] != 'ml_classification':
+            # Only evaluate and skip training
+            evaluate_test()
+            return
 
     # *********** Initialize data generators ***********
     dataset_class, collate_fn, runner_class = pipeline_factory(config)
@@ -248,6 +252,10 @@ def main(config):
     # note will be automatically shuffled if the DataLoader with  shuffle=True
     val_loader = list(val_loader)
     train_loader = list(train_loader)
+
+    if config['task'] == 'ml_classification':
+        run_ml_classification(config['data_name'], test_loader, train_loader, config['test_only']=='testset')
+        return
 
     trainer = runner_class(model, train_loader, device, loss_module, optimizer, l2_reg=output_reg,
                            print_interval=config['print_interval'], console=config['console'])
@@ -302,7 +310,8 @@ def main(config):
     logger.info('Starting training...')
     early_stop = False
     monitor_on = 'accuracy' if 'classification' in config['task'] else 'loss'
-    early_stopping = EarlyStopping(round(config['patience']/config['val_interval']), verbose=True, monitor_on=monitor_on)
+    early_stopping = EarlyStopping(round(config['patience'] / config['val_interval']), verbose=True,
+                                   monitor_on=monitor_on)
 
     # with torch.profiler.profile(
     #         schedule=torch.profiler.schedule(
@@ -351,6 +360,7 @@ def main(config):
                 logger.warning('early stopping reached')
 
         utils.save_model(os.path.join(config['save_dir'], 'model_{}.pth'.format(mark)), epoch, model, optimizer)
+        utils.save_model(os.path.join('experiments', 'tmp', config['data_class'] + '_model_last.pth'), epoch, optimizer)
 
         if early_stop:
             logger.warning('stopping training...')
