@@ -8,25 +8,21 @@ import time
 import traceback
 from collections import OrderedDict
 from datetime import datetime
-from functools import partial
 
+import logzero
 import numpy as np
 import sklearn
 import torch
+from logzero import logger
 from torch import Tensor
-from torch.profiler import tensorboard_trace_handler
 from torch.utils.data import DataLoader
 
-from datasets.dataset import DenoisingDataset, collate_denoising_unsuperv, collate_generic_superv, \
+from tmi.datasets.dataset import DenoisingDataset, collate_denoising_unsuperv, collate_generic_superv, \
     ImputationDataset, collate_imputation_unsuperv, DualBranchClassificationDataset, collate_dual_branch_superv, \
     GenericClassificationDataset, DenoisingImputationDataset
-from models.loss import l2_reg_loss
-from models.models import DualTSTransformerEncoderClassifier
-from utils import utils, analysis
-import logzero
-from logzero import logger
-
-
+from tmi.models.loss import l2_reg_loss
+from tmi.models.models import DualTSTransformerEncoderClassifier
+from tmi.utils import utils, analysis
 
 NEG_METRICS = {'loss'}  # metrics for which "better" is less
 
@@ -47,7 +43,8 @@ def pipeline_factory(config):
         return DenoisingImputationDataset, collate_imputation_unsuperv, UnsupervisedRunner
     if task in ['dual_branch_classification', 'dual_branch_classification_from_scratch']:
         return DualBranchClassificationDataset, collate_dual_branch_superv, SupervisedRunner
-    if task in ['feature_branch_classification', 'feature_branch_classification_from_scratch', 'trajectory_branch_classification',]:
+    if task in ['feature_branch_classification', 'feature_branch_classification_from_scratch',
+                'trajectory_branch_classification_from_scratch', ]:
         return GenericClassificationDataset, collate_generic_superv, SupervisedRunner
     if "cnn_classification" in task or "lstm_classification" in task:
         return GenericClassificationDataset, collate_generic_superv, SupervisedRunner
@@ -231,13 +228,14 @@ def validate(val_evaluator, tensorboard_writer, config, best_metrics, best_value
         utils.save_model(os.path.join(config['save_dir'], 'model_best.pth'), epoch, val_evaluator.model)
         # save to tmp, to make convenient train as pipline in shell
         try:
-            utils.save_model(os.path.join('experiments', 'tmp', config['data_class']+ '_model_best.pth'), epoch, val_evaluator.model)
+            utils.save_model(os.path.join('experiments', 'tmp', config['data_class'] + '_model_best.pth'), epoch,
+                             val_evaluator.model)
         except:
             logger.error('no tmp dir!')
         best_metrics = aggr_metrics.copy()
 
         pred_filepath = os.path.join(config['pred_dir'], 'best_predictions')
-        np.savez(pred_filepath, **per_batch)
+        # np.savez(pred_filepath, **per_batch)
 
     return aggr_metrics, best_metrics, best_value
 
@@ -478,7 +476,7 @@ class SupervisedRunner(BaseRunner):
             total_loss.backward()
 
             # torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=1.0)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=4.0)
+            # torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=4.0) # TODO uncomment this
             self.optimizer.step()
 
             metrics = {"loss": mean_loss.item()}

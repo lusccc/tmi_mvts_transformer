@@ -6,7 +6,10 @@ from torch import nn, Tensor
 from torch.nn import functional as F
 from torch.nn.modules import MultiheadAttention, Linear, Dropout, BatchNorm1d, TransformerEncoderLayer
 
-from utils import utils
+from tmi.utils import utils
+
+
+# from ..utils import utils
 
 
 def model_factory(config, data):
@@ -37,7 +40,7 @@ def model_factory(config, data):
     if task == 'feature_branch_classification':
         return TSTransformerEncoderClassifier(**utils.load_model_hyperparams(config['feature_branch_hyperparams']),
                                               num_classes=len(data.class_names))
-    if task == 'feature_branch_classification_from_scratch':
+    if task in ['feature_branch_classification_from_scratch', 'trajectory_branch_classification_from_scratch']:
         feat_dim = data.noise_feature_df.shape[1]
         max_seq_len = data.max_seq_len
         return TSTransformerEncoderClassifier(feat_dim, max_seq_len, config['d_model'], config['num_heads'],

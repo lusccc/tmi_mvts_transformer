@@ -6,38 +6,34 @@ George Zerveas et al. A Transformer-based Framework for Multivariate Time Series
 Proceedings of the 27th ACM SIGKDD Conference on Knowledge Discovery and Data Mining (KDD '21), August 14--18, 2021
 """
 
-import logzero
-import numpy as np
-from logzero import logger
-from torch.backends import cudnn
-from torch.profiler import tensorboard_trace_handler
+import json
 import os
 import sys
 import time
-import pickle
-import json
 
-# 3rd party packages
-from tqdm import tqdm
 import torch
-from torch.utils.data import DataLoader, WeightedRandomSampler
-from torch.utils.tensorboard import SummaryWriter
-
-from ML_comparison_hand_crafted import run_ml_classification
-# Project modules
-from datasets import dataset
-from options import Options
-from running import setup, pipeline_factory, validate, check_progress, NEG_METRICS
-from utils import utils
-from datasets.data import data_factory, Normalizer
-from datasets.datasplit import split_dataset
-from models.models import model_factory
-from models.loss import get_loss_module
-from optimizers import get_optimizer
-from training_tools import EarlyStopping
-
 # to address Too many open files Pin memory thread exited unexpectedly:
 import torch.multiprocessing
+from logzero import logger
+from torch.backends import cudnn
+from torch.profiler import tensorboard_trace_handler
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+# 3rd party packages
+from tqdm import tqdm
+
+from tmi.ML_comparison_hand_crafted import run_ml_classification
+# Project modules
+from tmi.datasets import dataset
+from tmi.datasets.data import data_factory, Normalizer
+from tmi.datasets.datasplit import split_dataset
+from tmi.models.loss import get_loss_module
+from tmi.models.models import model_factory
+from tmi.optimizers import get_optimizer
+from tmi.options import Options
+from tmi.running import setup, pipeline_factory, validate, check_progress, NEG_METRICS
+from tmi.training_tools import EarlyStopping
+from tmi.utils import utils
 
 torch.multiprocessing.set_sharing_strategy('file_system')
 
@@ -66,7 +62,7 @@ def main(config):
         logger.info("Using device: {}".format(device))
         logger.info("Device index: {}".format(torch.cuda.current_device()))
 
-    # ***********  Build data ***********
+    # @@@@ 1. Build data
     logger.info("Loading and preprocessing data ...")
     data_class = data_factory[config['data_class']]
     my_data = data_class(limit_size=config['limit_size'], config=config)
@@ -125,7 +121,7 @@ def main(config):
                        'val_indices': list(val_indices),
                        'test_indices': list(test_indices)}, f, indent=4)
 
-    # *********** Pre-process features ***********
+    # @@@@ 2. Preprocess features
     for df, normalization in my_data.feature_dfs:
         normalizer = Normalizer(normalization)
         df.loc[train_indices] = normalizer.normalize(df.loc[train_indices])
@@ -134,7 +130,7 @@ def main(config):
         if len(test_indices):
             df.loc[test_indices] = normalizer.normalize(df.loc[test_indices])
 
-    # *********** Create DL model ***********
+    # @@@@ 3. Create DL model
     if config['task'] != 'ml_classification':
         logger.info("Creating model ...")
         model = model_factory(config, my_data)
@@ -254,7 +250,7 @@ def main(config):
     train_loader = list(train_loader)
 
     if config['task'] == 'ml_classification':
-        run_ml_classification(config['data_name'], test_loader, train_loader, config['test_only']=='testset')
+        run_ml_classification(config['data_name'], test_loader, train_loader, config['test_only'] == 'testset')
         return
 
     trainer = runner_class(model, train_loader, device, loss_module, optimizer, l2_reg=output_reg,
@@ -272,7 +268,7 @@ def main(config):
                     warmup=2,
                     active=6,
                     repeat=1),
-                on_trace_ready=tensorboard_trace_handler('./'),
+                on_trace_ready=tensorboard_trace_handler('tmi/'),
                 with_stack=True
         ) as profiler:
             t_sum = 0

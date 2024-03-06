@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from sklearn.utils import shuffle
 
-from src.data_preprocess.utils import datatime_to_timestamp
+from tmi.data_preprocess.utils import datatime_to_timestamp
 
 
 def read_plt(plt_file):
