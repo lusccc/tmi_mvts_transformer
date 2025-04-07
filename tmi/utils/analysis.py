@@ -203,6 +203,40 @@ def print_confusion_matrix(ConfMat, label_strings=None, title='Confusion matrix'
                 + '\n' + tabulate(print_mat, headers=['True\Pred'] + label_strings, tablefmt='orgtbl'))
 
 
+def get_confusion_matrix_df(ConfMat, label_strings=None, title='Confusion matrix'):
+    """
+    将混淆矩阵转换为pandas DataFrame格式
+    
+    参数:
+        ConfMat: 混淆矩阵数组
+        label_strings: 标签名称列表，如果为None则使用空字符串
+        title: 混淆矩阵的标题（仅用于日志输出）
+    
+    返回:
+        pandas.DataFrame: 格式化的混淆矩阵DataFrame，行索引为真实标签，列为预测标签
+    """
+    import pandas as pd
+
+    if label_strings is None:
+        label_strings = ConfMat.shape[0] * ['']
+
+    # 记录到日志（保留原有功能）
+    print_mat = []
+    for i, row in enumerate(ConfMat):
+        print_mat.append([label_strings[i]] + list(row))
+    logger.info('\n' + title + '\n' + len(title) * '-'
+                + '\n' + tabulate(print_mat, headers=['True\Pred'] + label_strings, tablefmt='orgtbl'))
+
+    # 创建DataFrame
+    df = pd.DataFrame(ConfMat, index=label_strings, columns=label_strings)
+
+    # 添加行标签名称
+    df.index.name = 'True'
+    df.columns.name = 'Predicted'
+
+    return df
+
+
 class Analyzer(object):
 
     def __init__(self, maxcharlength=35, plot=False, print_conf_mat=False, output_filepath=None):
@@ -250,6 +284,83 @@ class Analyzer(object):
             plt.show(block=False)
 
         return accuracy_per_rank
+
+    def generate_classification_report_df(self, digits=3, number_of_thieves=2, maxcharlength=35, average_type='macro'):
+        """
+        返回包含分类指标的DataFrame，以便于保存为Excel格式。
+        支持不同的平均值计算方式。
+
+        参数:
+            digits: 显示结果时小数点后的位数
+            number_of_thieves: 报告中显示最大"小偷"类别的数量
+            maxcharlength: 显示类别名称时使用的最大字符数
+            average_type: 计算平均指标的方式，可选 'macro'(默认) 或 'weighted'
+        
+        返回:
+            pandas.DataFrame: 包含各类别精确度、召回率、F1分数等指标的DataFrame
+        """
+        import pandas as pd
+
+        # 计算相对频率
+        relative_freq = self.support / np.sum(self.support)  # 真实标签中各类别的相对频率
+        sorted_class_indices = np.argsort(relative_freq)[::-1]  # 按类别"重要性"（即出现频率）排序
+
+        # 准备DataFrame的数据
+        data = []
+
+        # 为每个类别添加一行数据
+        for i in sorted_class_indices:
+            row = {
+                'class': self.existing_class_names[i],
+                'accuracy': None,
+                'precision': self.precision[i],
+                'recall': self.recall[i],
+                'f1-score': self.f1[i],
+                'rel. freq.': relative_freq[i],
+                'abs. freq.': self.support[i]
+            }
+
+            # 计算"最大小偷"（误分类最多的类别）
+            thieves = np.argsort(self.ConfMatrix_normalized_row[i, :])[::-1][
+                      :number_of_thieves + 1]  # 从类别"偷走"的其他类别索引，可能包含自身
+            thieves = thieves[thieves != i]  # 排除自身
+            steal_ratio = self.ConfMatrix_normalized_row[i, thieves]
+
+            # 制作"最大小偷"列
+            thieves_info = {}
+            for j in range(len(thieves)):
+                thief_name = self.existing_class_names[thieves[j]][
+                             :min(maxcharlength, len(self.existing_class_names[thieves[j]]))]
+                thieves_info[f'thief_{j + 1}_name'] = thief_name
+                thieves_info[f'thief_{j + 1}_ratio'] = steal_ratio[j]
+
+            # 更新行数据
+            row.update(thieves_info)
+            data.append(row)
+
+        # 创建DataFrame
+        df = pd.DataFrame(data)
+
+        # 添加平均值/总和行
+        avg_row = {
+            'class': 'avg / total',
+            'accuracy': self.total_accuracy,  # 准确率放在第二列
+            'precision': np.mean(self.precision) if average_type.lower() == 'macro' else np.average(self.precision, weights=relative_freq),
+            'recall': np.mean(self.recall) if average_type.lower() == 'macro' else np.average(self.recall, weights=relative_freq),
+            'f1-score': np.mean(self.f1) if average_type.lower() == 'macro' else np.average(self.f1, weights=relative_freq),
+            'rel. freq.': np.sum(relative_freq),
+            'abs. freq.': np.sum(self.support)
+        }
+
+        # 将平均行添加到DataFrame
+        df = pd.concat([df, pd.DataFrame([avg_row])], ignore_index=True)
+
+        # 设置小数位数格式（对数值列）
+        for col in ['accuracy', 'precision', 'recall', 'f1-score', 'rel. freq.']:
+            if col in df.columns:  # 确保列存在
+                df[col] = df[col].apply(lambda x: round(x, digits) if pd.notnull(x) else x)
+
+        return df
 
     def generate_classification_report(self, digits=3, number_of_thieves=2, maxcharlength=35):
         """
@@ -386,7 +497,77 @@ class Analyzer(object):
 
             plt.show(block=False)
 
-    def analyze_classification(self, y_pred, y_true, class_names, excluded_classes=None):
+    def prec_rec_histogram_df(self, precision, recall, binedges=None):
+        """
+        创建精确度和召回率的分布直方图，并返回包含分布数据的DataFrame
+        
+        参数:
+            precision: 各类别的精确度(precision)数组
+            recall: 各类别的召回率(recall)数组
+            binedges: 直方图的bin边界。如果为None，将使用默认值
+            
+        返回:
+            pandas.DataFrame: 包含精确度和召回率分布的DataFrame
+        """
+        import pandas as pd
+
+        if binedges is None:
+            binedges = np.concatenate((np.arange(0, 0.6, 0.2), np.arange(0.6, 1.01, 0.1)), axis=0)
+            binedges = np.append(binedges, binedges[-1] + 0.1)  # 在最后添加额外的bin，用于 >= 1
+
+        # 计算直方图数据
+        hist_precision, binedges_precision = np.histogram(precision, binedges)
+        hist_recall, binedges_recall = np.histogram(recall, binedges)
+
+        # 记录到日志（保留原始功能）
+        logger.info("Distribution of classes with respect to PRECISION: ")
+        for b in range(len(binedges) - 1):
+            logger.info("[{:.1f}, {:.1f}): {}".format(binedges[b], binedges[b + 1], hist_precision[b]))
+
+        logger.info("Distribution of classes with respect to RECALL: ")
+        for b in range(len(binedges) - 1):
+            logger.info("[{:.1f}, {:.1f}): {}".format(binedges[b], binedges[b + 1], hist_recall[b]))
+
+        # 创建DataFrame
+        data = []
+        for b in range(len(binedges) - 1):
+            data.append({
+                'bin_start': binedges[b],
+                'bin_end': binedges[b + 1],
+                'precision_count': hist_precision[b],
+                'recall_count': hist_recall[b]
+            })
+
+        df = pd.DataFrame(data)
+
+        # 保留原始的绘图功能
+        if self.plot:
+            plt.figure()
+            plt.subplot(121)
+            widths = np.diff(binedges)
+            plt.bar(binedges[:-1], hist_precision, width=widths, align='edge')
+            plt.xlim(0, 1)
+            ax = plt.gca()
+            ax.set_xticks(binedges)
+            plt.xlabel('Precision')
+            plt.ylabel('Number of classes')
+            plt.title("Distribution of classes with respect to precision")
+
+            plt.subplot(122)
+            widths = np.diff(binedges)
+            plt.bar(binedges[:-1], hist_recall, width=widths, align='edge')
+            plt.xlim(0, 1)
+            ax = plt.gca()
+            ax.set_xticks(binedges)
+            plt.xlabel('Recall')
+            plt.ylabel('Number of classes')
+            plt.title("Distribution of classes with respect to recall")
+
+            plt.show(block=False)
+
+        return df
+
+    def analyze_classification(self, y_pred, y_true, class_names, excluded_classes=None, return_dfs=False):
         """
         For an array of label predictions and the respective true labels, shows confusion matrix, accuracy, recall, precision etc:
         Input:
@@ -409,11 +590,15 @@ class Analyzer(object):
         # Confusion matrix
         ConfMatrix = metrics.confusion_matrix(y_true, y_pred)
 
-        if self.print_conf_mat:
-            print_confusion_matrix(ConfMatrix, label_strings=self.existing_class_names, title='Confusion matrix')
-        if self.plot:
-            plt.figure()
-            plot_confusion_matrix(ConfMatrix, self.existing_class_names)
+        if return_dfs:
+            cm_df = get_confusion_matrix_df(ConfMatrix, label_strings=self.existing_class_names,
+                                            title='Confusion matrix')
+        else:
+            if self.print_conf_mat:
+                print_confusion_matrix(ConfMatrix, label_strings=self.existing_class_names, title='Confusion matrix')
+            if self.plot:
+                plt.figure()
+                plot_confusion_matrix(ConfMatrix, self.existing_class_names)
 
         # Normalize the confusion matrix by row (i.e by the number of samples in each class)
         self.ConfMatrix_normalized_row = ConfMatrix.astype('float') / ConfMatrix.sum(axis=1)[:, np.newaxis]
@@ -436,8 +621,12 @@ class Analyzer(object):
         self.precision, self.recall, self.f1, self.support = metrics.precision_recall_fscore_support(y_true, y_pred,
                                                                                                      labels=self.existing_class_ind)
 
-        # Print report
-        logger.info('classification report\n' + self.generate_classification_report())
+        if return_dfs:
+            classification_report_df = self.generate_classification_report_df(digits=4, number_of_thieves=2,
+                                                                              maxcharlength=35, average_type='macro')
+        else:
+            # Print report
+            logger.info('classification report\n' + self.generate_classification_report())
 
         # Calculate average precision and recall
         self.prec_avg, self.rec_avg = self.get_avg_prec_recall(ConfMatrix, self.existing_class_names, excluded_classes)
@@ -450,7 +639,14 @@ class Analyzer(object):
                     self.rec_avg, ', '.join(excluded_classes)))
 
         # Make a histogram with the distribution of classes with respect to precision and recall
-        self.prec_rec_histogram(self.precision, self.recall)
+        if return_dfs:
+            prec_rec_histogram_df = self.prec_rec_histogram_df(self.precision, self.recall)
+        else:
+            self.prec_rec_histogram(self.precision, self.recall)
 
-        return {"total_accuracy": self.total_accuracy, "precision": self.precision, "recall": self.recall,
-                "f1": self.f1, "support": self.support, "prec_avg": self.prec_avg, "rec_avg": self.rec_avg}
+        if return_dfs:
+            return {"cm_df": cm_df, "classification_report_df": classification_report_df,
+                    "prec_rec_histogram_df": prec_rec_histogram_df}
+        else:
+            return {"total_accuracy": self.total_accuracy, "precision": self.precision, "recall": self.recall,
+                    "f1": self.f1, "support": self.support, "prec_avg": self.prec_avg, "rec_avg": self.rec_avg}

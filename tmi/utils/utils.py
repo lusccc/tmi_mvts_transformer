@@ -6,8 +6,8 @@ import sys
 import time
 from copy import deepcopy
 
-
 import numpy as np
+import pandas as pd
 import torch
 import xlrd
 import xlwt
@@ -126,6 +126,29 @@ def create_dirs(dirs):
         exit(-1)
 
 
+def save_classification_results_to_excel(results_dict, output_dir):
+    """
+    将分类结果的三个DataFrame保存到Excel文件中的不同sheet。
+    
+    参数:
+        results_dict: 包含三个DataFrame的字典:
+            - cm_df: 混淆矩阵DataFrame
+            - classification_report_df: 分类报告DataFrame 
+            - prec_rec_histogram_df: 精确率-召回率直方图DataFrame
+        output_dir: 输出目录路径
+    """
+
+    output_path = os.path.join(output_dir, 'classification_results.xlsx')
+
+    # 使用ExcelWriter写入多个sheet
+    with pd.ExcelWriter(output_path) as writer:
+        results_dict['cm_df'].to_excel(writer, sheet_name='Confusion Matrix')
+        results_dict['classification_report_df'].to_excel(writer, sheet_name='Classification Report')
+        results_dict['prec_rec_histogram_df'].to_excel(writer, sheet_name='Precision Recall Histogram')
+
+    logger.info(f"分类结果已保存到: {output_path}")
+
+
 def export_performance_metrics(filepath, metrics_table, header, book=None, sheet_name="metrics"):
     """Exports performance metrics on the validation set for all epochs to an excel file"""
 
@@ -173,7 +196,7 @@ def export_record(filepath, values):
     work_book.save(filepath)
 
 
-def register_record(config, filepath, timestamp, experiment_name, best_metrics, final_metrics=None, comment=''):
+def register_record(config, filepath, timestamp, experiment_name, best_metrics, final_metrics=None):
     """
     Adds the best and final metrics of a given experiment as a record in an excel sheet with other experiment records.
     Creates excel sheet if it doesn't exist.
@@ -183,10 +206,9 @@ def register_record(config, filepath, timestamp, experiment_name, best_metrics, 
         experiment_name: string
         best_metrics: dict of metrics at best epoch {metric_name: metric_value}. Includes "epoch" as first key
         final_metrics: dict of metrics at final epoch {metric_name: metric_value}. Includes "epoch" as first key
-        comment: optional description
     """
     metrics_names, metrics_values = zip(*best_metrics.items())
-    row_values = [timestamp, experiment_name, comment] + list(metrics_values)
+    row_values = [timestamp, experiment_name] + list(metrics_values)
     if final_metrics is not None:
         final_metrics_names, final_metrics_values = zip(*final_metrics.items())
         row_values += list(final_metrics_values)
@@ -197,7 +219,7 @@ def register_record(config, filepath, timestamp, experiment_name, best_metrics, 
         directory = os.path.dirname(filepath)
         if len(directory) and not os.path.exists(directory):
             os.makedirs(directory)
-        header = ["Timestamp", "Name", "Comment"] + ["Best " + m for m in metrics_names]
+        header = ["Timestamp", "Name"] + ["Best " + m for m in metrics_names]
         if final_metrics is not None:
             header += ["Final " + m for m in final_metrics_names]
         header += ['DataClass', 'Task', 'DataInputType', 'TestOnly', 'ResultsPath', ]

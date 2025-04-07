@@ -98,8 +98,8 @@ def read_all_users(folder):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='TRJ_EXT')
     parser.add_argument('--use_modes', type=str, default='0,1,2,3,4')
-    parser.add_argument('--data_dir', type=str, default='/mnt/xs/DATASET/Geolife Trajectories 1.3-Raw-All/Geolife Trajectories 1.3/Data')
-    parser.add_argument('--save_dir', type=str, default='./data/geolife_extracted/')
+    parser.add_argument('--data_dir', type=str, default='/mnt/f/tmi-code/DATASET/Geolife Trajectories 1.3-Raw-All/Geolife Trajectories 1.3/Data')
+    parser.add_argument('--save_dir', type=str, default='../../data/geolife_extracted/')
 
     args = parser.parse_args()
 
@@ -124,7 +124,7 @@ if __name__ == '__main__':
     trjs = []
     trjs_labels = []
     df = read_all_users(args.data_dir)
-    trjs = np.array(trjs)
+    trjs = np.array(trjs, dtype=object)
     labels = np.array(trjs_labels)
 
     trjs, labels = shuffle(trjs, labels, random_state=10086)  # note: shuffles here !!

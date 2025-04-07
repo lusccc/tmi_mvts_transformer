@@ -51,7 +51,7 @@ def model_factory(config, data):
     if 'cnn_classification' in task:
         return CNN1DClassifier_128()
     if 'lstm_classification' in task:
-        return LSTMResClassifier()
+        return MSRLSTMClassifier()
 
 
 def _get_activation_fn(activation):
@@ -559,6 +559,7 @@ class CNN1DClassifier_128(nn.Module):
         return x
 
 
+# @deprecated(reason="This model is deprecated. Please use MSRLSTMClassifier instead.")
 class LSTMResClassifier(nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -587,3 +588,88 @@ class LSTMResClassifier(nn.Module):
         out = F.relu(out)
         out = self.fcl2(out[-1, :, :])
         return out
+
+
+class MSRLSTMClassifier(nn.Module):
+    """
+    for paper Wang, Chenxing, et al. 
+    "Combining residual and LSTM recurrent networks for
+      transportation mode detection using multimodal sensors 
+      integrated in smartphones." IEEE Transactions on Intelligent 
+      Transportation Systems 22.9 (2020): 5473-5485.
+    """
+    def __init__(self):
+        super(MSRLSTMClassifier, self).__init__()
+        self.num_classes = 5
+        
+        # CNN参数
+        self.cnn_filters = 32
+        self.cnn_kernel_size = 3
+        
+        # ResNet参数
+        self.res_filters = [32, 64, 64, 32] 
+        self.res_kernel_sizes = [3, 3, 3, 3]
+        
+        # LSTM参数
+        self.lstm_hidden = 128
+        self.lstm_dropout = 0.3
+        
+        # Attention参数
+        self.attention_dim = 64
+        
+        # 卷积层
+        self.conv1 = nn.Conv1d(4, self.cnn_filters, self.cnn_kernel_size, padding='same')
+        
+        # ResNet块
+        self.res_conv1 = nn.Conv1d(self.cnn_filters, self.res_filters[0], self.res_kernel_sizes[0], padding='same')
+        self.res_conv2 = nn.Conv1d(self.res_filters[0], self.res_filters[1], self.res_kernel_sizes[1], padding='same')
+        self.res_shortcut = nn.Conv1d(self.cnn_filters, self.res_filters[1], 1, padding='same')
+        self.maxpool = nn.MaxPool1d(2, padding=1)
+        
+        # LSTM层
+        self.lstm = nn.LSTM(self.res_filters[1], self.lstm_hidden, batch_first=True, dropout=self.lstm_dropout)
+        
+        # Attention层
+        self.attention1 = nn.Linear(self.lstm_hidden, self.attention_dim)
+        self.attention2 = nn.Linear(self.attention_dim, 1)
+        
+        # 输出层
+        self.fc1 = nn.Linear(self.lstm_hidden, 64)
+        self.dropout = nn.Dropout(0.5)
+        self.fc2 = nn.Linear(64, self.num_classes)
+
+    def forward(self, x, *args, **kwargs):
+        # 输入x: (batch_size, seq_length, 4)
+        
+        # 调整维度顺序以适配CNN
+        x = x.permute(0, 2, 1)  # (batch_size, 4, seq_length)
+        
+        # CNN
+        x = F.relu(self.conv1(x))
+        
+        # ResNet
+        identity = x
+        x = F.relu(self.res_conv1(x))
+        x = self.maxpool(x)
+        x = F.relu(self.res_conv2(x))
+        identity = self.res_shortcut(identity)
+        identity = self.maxpool(identity)
+        x = x + identity
+        x = F.relu(x)
+        
+        # 调整维度以适配LSTM
+        x = x.permute(0, 2, 1)  # (batch_size, seq_length, channels)
+        
+        # LSTM
+        lstm_out, _ = self.lstm(x)
+        
+        # Attention
+        attention = F.softmax(self.attention2(F.tanh(self.attention1(lstm_out))), dim=1)
+        x = torch.sum(attention * lstm_out, dim=1)
+        
+        # 输出层
+        x = F.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)
+        
+        return x

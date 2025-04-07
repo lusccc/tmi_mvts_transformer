@@ -3,20 +3,16 @@ import multiprocessing
 import os
 import time
 
-import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 from geopy.distance import geodesic
 # from imblearn.over_sampling import ADASYN
 from logzero import logger
+
+from utils import check_lat_lng, timestamp_to_hour, calc_initial_compass_bearing, \
+    generate_mask_for_feature_using_EP, \
+    generate_mask_for_trj_using_KDE_RPD
 from utils import interp_single_seg, interp_trj_seg
 from utils import segment_single_series
-from utils import check_lat_lng, timestamp_to_hour, calc_initial_compass_bearing, \
-    to_categorical, get_consecutive_ones_range_indices, generate_mask_using_CPD, \
-    generate_mask_using_CPD_unknown_CP_number, generate_mask_for_trj_using_KDE, generate_mask_for_feature_using_EP, \
-    generate_mask_for_trj_using_KDE_RPD
-
-import matplotlib
 
 # matplotlib.use('Qt5Agg')
 
@@ -82,7 +78,7 @@ def filter_error_gps_data(trjs, labels):
             trjs_filtered.append(trj)
             labels_filtered.append(label)
 
-    return np.array(trjs_filtered, dtype=object), np.array(labels_filtered, dtype=object)
+    return np.array(trjs_filtered, dtype=object), np.array(labels_filtered, dtype=np.int32)
 
 
 def do_filter_error_gps_data(trjs, labels):
@@ -389,6 +385,8 @@ def do_calc_feature(trj_segs, trj_seg_labels, args):
         # trj_seg_masks.append(trj_seg_mask)
 
     logger.info('* end a thread calc feature')
+    if len(np.array(ns_trj_segs, dtype=object).shape) !=2:
+        print()
     return \
         np.array(ns_trj_segs, dtype=object), \
         np.array(cn_trj_segs, dtype=object), \
@@ -415,14 +413,21 @@ if __name__ == '__main__':
     parser.add_argument('--n_class', type=int, default=5)  # use modes:2,4,6,5,7
     parser.add_argument('--save_dir', type=str, required=True)
 
-    parser.add_argument('--mean_mask_length', type=float, default=3, )
-    parser.add_argument('--mask_ratio', type=float, default=0.3)
+    parser.add_argument('--mean_mask_length', type=int, default=4, )
+    # parser.add_argument('--mask_ratio', type=float, default=0.3)
 
     args = parser.parse_args()
 
     # raw data
     trjs = np.load(args.trjs_path, allow_pickle=True)
     labels = np.load(args.labels_path, allow_pickle=True)
+    
+    # TODO 随机打乱数据，防止res 合并时报错，如果还是报错多运行几次：
+    # ValueError: all the input arrays must have same number of dimensions, 
+    # but the array at index 0 has 2 dimension(s) and the array at index 3 has 3 dimension(s)
+    shuffle_idx = np.random.permutation(len(trjs))
+    trjs = trjs[shuffle_idx]
+    labels = labels[shuffle_idx]
 
     # preprocess
     trjs, labels = filter_error_gps_data(trjs, labels)

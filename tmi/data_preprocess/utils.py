@@ -7,9 +7,9 @@ import numpy as np
 import pandas as pd
 import sklearn
 from KDEpy import FFTKDE
-from kats.consts import TimeSeriesData
-from kats.detectors.bocpd import BOCPDetector, BOCPDModelType, NormalKnownParameters
-from scipy.optimize import linear_sum_assignment
+# from kats.consts import TimeSeriesData
+# from kats.detectors.bocpd import BOCPDetector, BOCPDModelType, NormalKnownParameters
+# from scipy.optimize import linear_sum_assignment
 from scipy.spatial import distance
 from scipy.stats import gaussian_kde
 from skimage.feature import peak_local_max
@@ -27,58 +27,6 @@ from datetime import datetime
 from sklearn.preprocessing import StandardScaler, LabelEncoder, MinMaxScaler
 from logzero import logger
 import ruptures as rpt
-
-
-def scale_any_shape_data(data, scaler):
-    data = np.array(data)
-    shape_ = data.shape
-    data = data.reshape((-1, 1))
-    data = scaler.fit_transform(data)
-    data = np.reshape(data, shape_)
-    return data
-
-
-def scale_data(data, scaler):
-    data = np.array(data)
-    data = scaler.fit_transform(data)
-    return data
-
-
-def scale_RP_each_feature(RP_all_features):
-    scaler = StandardScaler()
-    n_features = RP_all_features.shape[3]
-    for i in range(n_features):
-        RP_single_feature = RP_all_features[:, :, :, i]
-        scaled = scale_any_shape_data(RP_single_feature, scaler)
-        RP_all_features[:, :, :, i] = scaled
-    return RP_all_features
-
-
-def scale_segs_each_features(segs_all_features):
-    scaler = StandardScaler()
-    n_features = segs_all_features.shape[1]
-    for i in range(n_features):
-        segs_single_feature = segs_all_features[:, i, :]
-        scaled = scale_any_shape_data(segs_single_feature, scaler)
-        segs_all_features[:, i, :] = scaled
-    return segs_all_features
-
-
-@jit(nopython=True)
-def hampel_filter_forloop_numba(input_series, window_size=10, n_sigmas=3):
-    n = len(input_series)
-    new_series = input_series.copy()
-    k = 1.4826  # scale factor for Gaussian distribution
-    indices = []
-
-    for i in range((window_size), (n - window_size)):
-        x0 = np.nanmedian(input_series[(i - window_size):(i + window_size)])
-        S0 = k * np.nanmedian(np.abs(input_series[(i - window_size):(i + window_size)] - x0))
-        if (np.abs(input_series[i] - x0) > n_sigmas * S0):
-            new_series[i] = x0
-            indices.append(i)
-
-    return new_series
 
 
 def check_lat_lng(p):
@@ -252,35 +200,35 @@ def to_categorical(y, num_classes):
 
 
 # Metrics class was copied from DCEC article authors repository (link in README)
-class metrics:
-    nmi = sklearn.metrics.normalized_mutual_info_score
-    ari = sklearn.metrics.adjusted_rand_score
-
-    @staticmethod
-    def acc(y_true, y_pred):
-        """
-        Calculate clustering accuracy. Require scikit-learn installed
-
-        # Arguments
-            y: true labels, numpy.array with shape `(n_samples,)`
-            y_pred: predicted labels, numpy.array with shape `(n_samples,)`
-
-        # Return
-            accuracy, in [0,1]
-        """
-        y_true = y_true.astype(np.int64)
-        # print('y_pred:{}  y_true:{}'.format(y_pred, y_true))
-        assert y_pred.size == y_true.size
-        D = max(y_pred.max(), y_true.max()) + 1
-        w = np.zeros((D, D), dtype=np.int64)
-        for i in range(y_pred.size):
-            w[y_pred[i], y_true[i]] += 1
-        # from sklearn.utils.linear_assignment_ import linear_assignment
-        # https://stackoverflow.com/questions/57369848/how-do-i-resolve-use-scipy-optimize-linear-sum-assignment-instead
-        ind = linear_sum_assignment(w.max() - w)
-        ind = np.asarray(ind)
-        ind = np.transpose(ind)
-        return sum([w[i, j] for i, j in ind]) * 1.0 / y_pred.size
+# class metrics:
+#     nmi = sklearn.metrics.normalized_mutual_info_score
+#     ari = sklearn.metrics.adjusted_rand_score
+#
+#     @staticmethod
+#     def acc(y_true, y_pred):
+#         """
+#         Calculate clustering accuracy. Require scikit-learn installed
+#
+#         # Arguments
+#             y: true labels, numpy.array with shape `(n_samples,)`
+#             y_pred: predicted labels, numpy.array with shape `(n_samples,)`
+#
+#         # Return
+#             accuracy, in [0,1]
+#         """
+#         y_true = y_true.astype(np.int64)
+#         # print('y_pred:{}  y_true:{}'.format(y_pred, y_true))
+#         assert y_pred.size == y_true.size
+#         D = max(y_pred.max(), y_true.max()) + 1
+#         w = np.zeros((D, D), dtype=np.int64)
+#         for i in range(y_pred.size):
+#             w[y_pred[i], y_true[i]] += 1
+#         # from sklearn.utils.linear_assignment_ import linear_assignment
+#         # https://stackoverflow.com/questions/57369848/how-do-i-resolve-use-scipy-optimize-linear-sum-assignment-instead
+#         ind = linear_sum_assignment(w.max() - w)
+#         ind = np.asarray(ind)
+#         ind = np.transpose(ind)
+#         return sum([w[i, j] for i, j in ind]) * 1.0 / y_pred.size
 
 
 def one_runs(a):
@@ -454,7 +402,7 @@ def generate_mask_for_trj_using_KDE_RPD(trj_seg, mean_mask_length=2):
         elif int(idx + int(mean_mask_length / 2)) >= n_points:
             mask_vec[-mean_mask_length:] = 0
         else:
-            mask_vec[idx - int(mean_mask_length / 2):idx - int(mean_mask_length / 2) + mean_mask_length] = 0
+            mask_vec[int(idx - int(mean_mask_length / 2)):int(idx - int(mean_mask_length / 2) + mean_mask_length)] = 0
 
     return mask_vec
 
@@ -548,9 +496,32 @@ def generate_mask_for_feature_using_EP(feature_seg, mean_mask_length=2):
     n_points = len(feature_seg)
     idx_ep = getExtremePoints(feature_seg, typeOfInflexion='max')
     if idx_ep is None:
-        logger.warning('no ExtremePoints ! mask all points!')
-        mask_vec = np.zeros(n_points)
+        # logger.warning('no ExtremePoints found - applying random mask for training')
+        # 计算序列的总体变化趋势
+        trend = np.polyfit(np.arange(n_points), feature_seg, 1)[0]
+        std = np.std(feature_seg)
+
+        if std < 1e-6:  # 几乎是常数序列
+            # 只mask少量点
+            n_masks = max(2, int(0.1 * n_points))
+            mask_positions = np.linspace(0, n_points - 1, n_masks, dtype=int)
+        else:  # 单调序列
+            # mask起点、终点和若干中间点
+            n_middle_points = max(1, int(n_points / mean_mask_length) - 2)
+            mask_positions = np.concatenate([
+                [0],  # 起点
+                np.linspace(mean_mask_length, n_points - mean_mask_length, n_middle_points, dtype=int),  # 中间点
+                [n_points - 1]  # 终点
+            ])
+
+        # 生成mask
+        mask_vec = np.ones(n_points)
+        for pos in mask_positions:
+            start_idx = max(0, int(pos - mean_mask_length / 2))
+            end_idx = min(n_points, int(pos + mean_mask_length / 2))
+            mask_vec[start_idx:end_idx] = 0
     else:
+        # logger.info(f'ExtremePoints found - applying mask for training')
         mask_vec = np.ones(n_points)
         for idx in idx_ep:
             # logger.info(idx)
@@ -561,7 +532,8 @@ def generate_mask_for_feature_using_EP(feature_seg, mean_mask_length=2):
             elif int(idx + int(mean_mask_length / 2)) >= n_points:
                 mask_vec[-mean_mask_length:] = 0
             else:
-                mask_vec[idx - int(mean_mask_length / 2):idx - int(mean_mask_length / 2) + mean_mask_length] = 0
+                mask_vec[
+                int(idx - int(mean_mask_length / 2)):int(idx - int(mean_mask_length / 2) + mean_mask_length)] = 0
     return mask_vec
 
 
@@ -629,51 +601,50 @@ warnings.filterwarnings("ignore", category=UserWarning)
 # time_convert = np.vectorize(lambda x: datetime.fromtimestamp(x))
 time_convert = np.vectorize(lambda x: datetime.fromtimestamp(x))
 
+# def get_mask_with_BOCPDetector(time_seg, feature_seg, mask_ratio=.15, mean_mask_length=3):
+#     """
+#     deprecated!!!!!
+#     change point detection, then, generate mask
+#     """
+#     n_points = len(feature_seg)
+#     n_mask = int(n_points * mask_ratio)
+#     n_expected_change_point = int(n_mask / mean_mask_length)
+#     ts_df = pd.DataFrame({'time': time_convert(time_seg), 'y': feature_seg})
+#     ts = TimeSeriesData(ts_df)
+#     detector = BOCPDetector(ts)  # https://github.com/facebookresearch/Kats/blob/main/tutorials/kats_202_detection.ipynb
 
-def get_mask_with_BOCPDetector(time_seg, feature_seg, mask_ratio=.15, mean_mask_length=3):
-    """
-    deprecated!!!!!
-    change point detection, then, generate mask
-    """
-    n_points = len(feature_seg)
-    n_mask = int(n_points * mask_ratio)
-    n_expected_change_point = int(n_mask / mean_mask_length)
-    ts_df = pd.DataFrame({'time': time_convert(time_seg), 'y': feature_seg})
-    ts = TimeSeriesData(ts_df)
-    detector = BOCPDetector(ts)  # https://github.com/facebookresearch/Kats/blob/main/tutorials/kats_202_detection.ipynb
+#     min_threshold = .11
+#     lr = .1
+#     curr_threshold = .5
+#     change_points = []
+#     n_change_point = 0
+#     while curr_threshold > min_threshold and n_change_point < n_expected_change_point:
+#         # logger.info(f'curr_threshold:{curr_threshold}')
+#         change_points = detector.detector(
+#             model=BOCPDModelType.NORMAL_KNOWN_MODEL, changepoint_prior=mask_ratio, threshold=curr_threshold,
+#             model_parameters=NormalKnownParameters(empirical=False, )
+#         )
 
-    min_threshold = .11
-    lr = .1
-    curr_threshold = .5
-    change_points = []
-    n_change_point = 0
-    while curr_threshold > min_threshold and n_change_point < n_expected_change_point:
-        # logger.info(f'curr_threshold:{curr_threshold}')
-        change_points = detector.detector(
-            model=BOCPDModelType.NORMAL_KNOWN_MODEL, changepoint_prior=mask_ratio, threshold=curr_threshold,
-            model_parameters=NormalKnownParameters(empirical=False, )
-        )
+#         curr_threshold -= lr
+#         # logger.info(f'n_change_point:{len(change_points)}')
+#     n_change_point = len(change_points)
+#     if n_change_point < n_expected_change_point:
+#         logger.warn(f'n_change_point:{n_change_point} not meet n_expected_change_point:{n_expected_change_point}')
 
-        curr_threshold -= lr
-        # logger.info(f'n_change_point:{len(change_points)}')
-    n_change_point = len(change_points)
-    if n_change_point < n_expected_change_point:
-        logger.warn(f'n_change_point:{n_change_point} not meet n_expected_change_point:{n_expected_change_point}')
+#     # 0s means mask, 1s means not affected
+#     mask_vec = np.ones(n_points)
+#     for cp in change_points:
+#         cp = ts_df.index[ts_df['time'] == cp.start_time].tolist()
+#         assert len(cp) == 1
+#         cp_idx = cp[0]
+#         # logger.info(cp_idx)
+#         # check beginning
+#         if int(cp_idx - int(mean_mask_length / 2)) <= 0:
+#             mask_vec[:mean_mask_length] = 0  # assign mask at beginning
+#         # check end
+#         elif int(cp_idx + int(mean_mask_length / 2)) >= n_points:
+#             mask_vec[-mean_mask_length:] = 0  # assign mask at end
+#         else:
+#             mask_vec[cp_idx - int(mean_mask_length / 2):cp_idx - int(mean_mask_length / 2) + mean_mask_length] = 0
 
-    # 0s means mask, 1s means not affected
-    mask_vec = np.ones(n_points)
-    for cp in change_points:
-        cp = ts_df.index[ts_df['time'] == cp.start_time].tolist()
-        assert len(cp) == 1
-        cp_idx = cp[0]
-        # logger.info(cp_idx)
-        # check beginning
-        if int(cp_idx - int(mean_mask_length / 2)) <= 0:
-            mask_vec[:mean_mask_length] = 0  # assign mask at beginning
-        # check end
-        elif int(cp_idx + int(mean_mask_length / 2)) >= n_points:
-            mask_vec[-mean_mask_length:] = 0  # assign mask at end
-        else:
-            mask_vec[cp_idx - int(mean_mask_length / 2):cp_idx - int(mean_mask_length / 2) + mean_mask_length] = 0
-
-    return mask_vec
+#     return mask_vec

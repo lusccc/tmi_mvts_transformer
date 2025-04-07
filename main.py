@@ -1,16 +1,10 @@
-"""
-Written by George Zerveas
-
-If you use any part of the code in this repository, please consider citing the following paper:
-George Zerveas et al. A Transformer-based Framework for Multivariate Time Series Representation Learning, in
-Proceedings of the 27th ACM SIGKDD Conference on Knowledge Discovery and Data Mining (KDD '21), August 14--18, 2021
-"""
-
 import json
 import os
 import sys
 import time
 
+import numpy as np
+import pandas as pd
 import torch
 # to address Too many open files Pin memory thread exited unexpectedly:
 import torch.multiprocessing
@@ -21,8 +15,10 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 # 3rd party packages
 from tqdm import tqdm
+from imblearn.combine import SMOTEENN
 
-from tmi.ML_comparison_hand_crafted import run_ml_classification
+from tmi.ml_classification import MLClassifier, calc_handcrafted_features
+
 # Project modules
 from tmi.datasets import dataset
 from tmi.datasets.data import data_factory, Normalizer
@@ -31,373 +27,604 @@ from tmi.models.loss import get_loss_module
 from tmi.models.models import model_factory
 from tmi.optimizers import get_optimizer
 from tmi.options import Options
-from tmi.running import setup, pipeline_factory, validate, check_progress, NEG_METRICS
+from tmi.runner import setup, pipeline_factory, validate, check_progress, NEG_METRICS
 from tmi.training_tools import EarlyStopping
 from tmi.utils import utils
 
-torch.multiprocessing.set_sharing_strategy('file_system')
 
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-logger.info("Loading packages ...")
+class TrainingPipeline:
+    def __init__(self, config):
+        """初始化训练流程"""
+        self.config = config
+        self.total_epoch_time = 0
+        self.total_eval_time = 0
+        self.total_start_time = time.time()
+        
+        # 记录运行命令
+        logger.info('Running:\n{}\n'.format(' '.join(sys.argv)))
+        
+        # 设置随机种子
+        if self.config['seed'] is not None:
+            torch.manual_seed(self.config['seed'])
+            
+        # 设置设备
+        self._setup_device()
+        
+        # 初始化必要的变量
+        self.train_data = None
+        self.test_data = None
+        self.val_data = None
+        self.train_indices = None
+        self.val_indices = None
+        self.test_indices = None
+        self.model = None
+        self.optimizer = None
+        self.loss_module = None
+        self.tensorboard_writer = None
 
+    def _setup_device(self):
+        """设置计算设备"""
+        device = 'cuda' if (torch.cuda.is_available() and self.config['gpu'] != '-1') else 'cpu'
+        if device != 'cuda':
+            logger.error("no cuda!! ")
+            device = torch.device(device)
+        else:
+            device = torch.device(device)
+            logger.info("Using device: {}".format(device))
+            logger.info("Device index: {}".format(torch.cuda.current_device()))
+        self.device = device
 
-def main(config):
-    total_epoch_time = 0
-    total_eval_time = 0
+    def setup_data(self):
+        """加载和预处理数据"""
+        logger.info("Loading and preprocessing data ...")
+        
+        # 1. 加载数据
+        data_class = data_factory[self.config['data_class']]
+        self.train_data = data_class(limit_size=self.config['limit_size'], config=self.config, data_split='train')
+        self.test_data = data_class(limit_size=self.config['limit_size'], config=self.config, data_split='test')
+        
+        # 确定验证方法
+        if 'classification' in self.config['task']:
+            validation_method = 'ShuffleSplit'
+            labels = self.train_data.labels_df.values.flatten()
+        else:
+            validation_method = 'ShuffleSplit'
+            labels = None
 
-    total_start_time = time.time()
+        # 2. 分割数据集
+        self.test_indices = self.test_data.all_IDs
+        self.val_data = self.train_data  # 会被val_indices过滤
+        self.val_indices = []
 
-    logger.info('Running:\n{}\n'.format(' '.join(sys.argv)))  # command used to run
+        if self.config['val_ratio'] > 0:
+            self.train_indices, self.val_indices, _ = split_dataset(
+                data_indices=self.train_data.all_IDs,
+                validation_method=validation_method,
+                n_splits=1,
+                validation_ratio=self.config['val_ratio'],
+                test_set_ratio=None,
+                test_indices=self.test_indices,
+                random_seed=10086,
+                labels=labels
+            )
+            self.train_indices = self.train_indices[0]
+            self.val_indices = self.val_indices[0]
+        else:
+            self.train_indices = self.train_data.all_IDs
+            if self.test_indices is None:
+                self.test_indices = []
 
-    if config['seed'] is not None:
-        torch.manual_seed(config['seed'])
+        # 3. 输出数据集大小信息
+        logger.info("{} samples may be used for training".format(len(self.train_indices)))
+        logger.info("{} samples will be used for validation".format(len(self.val_indices)))
+        logger.info("{} samples will be used for testing".format(len(self.test_indices)))
 
-    device = 'cuda' if (torch.cuda.is_available() and config['gpu'] != '-1') else 'cpu'
-    if device != 'cuda':
-        logger.error("no cuda!! ")
-        # exit(-1)
-        device = torch.device(device)
-    else:
-        device = torch.device(device)
-        logger.info("Using device: {}".format(device))
-        logger.info("Device index: {}".format(torch.cuda.current_device()))
+        # 4. 保存数据索引
+        self._save_data_indices()
+        
+        # 5. 对特征进行预处理
+        self._preprocess_features()
+    
+    def _save_data_indices(self):
+        """保存数据分割索引"""
+        with open(os.path.join(self.config['output_dir'], 'data_indices.json'), 'w') as f:
+            try:
+                json.dump({
+                    'train_indices': list(map(int, self.train_indices)),
+                    'val_indices': list(map(int, self.val_indices)),
+                    'test_indices': list(map(int, self.test_indices))
+                }, f, indent=4)
+            except ValueError:  # 处理非整数索引
+                json.dump({
+                    'train_indices': list(self.train_indices),
+                    'val_indices': list(self.val_indices),
+                    'test_indices': list(self.test_indices)
+                }, f, indent=4)
+    
+    def _preprocess_features(self):
+        """预处理特征"""
+        for (train_df, train_normalization), (test_df, test_normalization) in zip(
+                self.train_data.feature_dfs, self.test_data.feature_dfs):
+            normalizer = Normalizer(train_normalization)
+            train_df.loc[self.train_indices] = normalizer.normalize(train_df.loc[self.train_indices])
+            if len(self.val_indices):
+                train_df.loc[self.val_indices] = normalizer.normalize(train_df.loc[self.val_indices])
+            test_df.loc[self.test_indices] = normalizer.normalize(test_df.loc[self.test_indices])
 
-    # @@@@ 1. Build data
-    logger.info("Loading and preprocessing data ...")
-    data_class = data_factory[config['data_class']]
-    my_data = data_class(limit_size=config['limit_size'], config=config)
-    # feat_dim = my_data.feature_df.shape[1]  # dimensionality of data features
-    if 'classification' in config['task']:
-        # validation_method = 'StratifiedShuffleSplit'
-        validation_method = 'ShuffleSplit'
-        labels = my_data.labels_df.values.flatten()
-    else:
-        validation_method = 'ShuffleSplit'
-        labels = None
-
-    # Split dataset
-    test_data = my_data
-    test_indices = None  # will be converted to empty list in `split_dataset`, if also test_set_ratio == 0
-    val_data = my_data
-    val_indices = []
-    # load test IDs directly from file, if available, otherwise use `test_set_ratio`.
-    if config['test_from']:
-        test_indices = list(set([line.rstrip() for line in open(config['test_from']).readlines()]))
-        try:
-            test_indices = [int(ind) for ind in test_indices]  # integer indices
-        except ValueError:
-            pass  # in case indices are non-integers
-        logger.info("Loaded {} test IDs from file: '{}'".format(len(test_indices), config['test_from']))
-
-    # Note: currently a validation set must exist,
-    if config['val_ratio'] > 0:
-        train_indices, val_indices, test_indices = split_dataset(data_indices=my_data.all_IDs,
-                                                                 validation_method=validation_method,
-                                                                 n_splits=1,
-                                                                 validation_ratio=config['val_ratio'],
-                                                                 test_set_ratio=config['test_ratio'],
-                                                                 # used only if test_indices not explicitly specified
-                                                                 test_indices=test_indices,
-                                                                 random_seed=10086,
-                                                                 labels=labels)
-        train_indices = train_indices[0]  # `split_dataset` returns a list of indices *per fold/split*
-        val_indices = val_indices[0]  # `split_dataset` returns a list of indices *per fold/split*
-    else:
-        train_indices = my_data.all_IDs
-        if test_indices is None:
-            test_indices = []
-
-    logger.info("{} samples may be used for training".format(len(train_indices)))
-    logger.info("{} samples will be used for validation".format(len(val_indices)))
-    logger.info("{} samples will be used for testing".format(len(test_indices)))
-
-    with open(os.path.join(config['output_dir'], 'data_indices.json'), 'w') as f:
-        try:
-            json.dump({'train_indices': list(map(int, train_indices)),
-                       'val_indices': list(map(int, val_indices)),
-                       'test_indices': list(map(int, test_indices))}, f, indent=4)
-        except ValueError:  # in case indices are non-integers
-            json.dump({'train_indices': list(train_indices),
-                       'val_indices': list(val_indices),
-                       'test_indices': list(test_indices)}, f, indent=4)
-
-    # @@@@ 2. Preprocess features
-    for df, normalization in my_data.feature_dfs:
-        normalizer = Normalizer(normalization)
-        df.loc[train_indices] = normalizer.normalize(df.loc[train_indices])
-        if len(val_indices):
-            df.loc[val_indices] = normalizer.normalize(df.loc[val_indices])
-        if len(test_indices):
-            df.loc[test_indices] = normalizer.normalize(df.loc[test_indices])
-
-    # @@@@ 3. Create DL model
-    if config['task'] != 'ml_classification':
+    def setup_dl_model(self):
+        """创建和初始化深度学习模型"""
         logger.info("Creating model ...")
-        model = model_factory(config, my_data)
+        self.model = model_factory(self.config, self.train_data)
 
-        if config['freeze']:
-            for name, param in model.named_parameters():
+        # 设置冻结层
+        if self.config['freeze']:
+            for name, param in self.model.named_parameters():
                 if 'output_layer' in name:
                     logger.info(f'set layer {name} requires_grad = True')
                     param.requires_grad = True
                 else:
                     param.requires_grad = False
 
-        logger.info("Model:\n{}".format(model))
-        logger.info("Total number of parameters: {}".format(utils.count_parameters(model)))
-        logger.info("Trainable parameters: {}".format(utils.count_parameters(model, trainable=True)))
+        # 输出模型信息
+        logger.info("Model:\n{}".format(self.model))
+        logger.info("Total number of parameters: {}".format(utils.count_parameters(self.model)))
+        logger.info("Trainable parameters: {}".format(utils.count_parameters(self.model, trainable=True)))
 
-        # Initialize optimizer
-        if config['global_reg']:
-            weight_decay = config['l2_reg']
-            output_reg = None
+        # 初始化优化器
+        self._setup_optimizer()
+        
+        # 加载模型状态
+        self._load_model_state()
+        
+        # 设置损失函数
+        self.loss_module = get_loss_module(self.config)
+        
+    def _setup_optimizer(self):
+        """设置优化器"""
+        if self.config['global_reg']:
+            weight_decay = self.config['l2_reg']
+            self.output_reg = None
         else:
             weight_decay = 0
-            output_reg = config['l2_reg']
+            self.output_reg = self.config['l2_reg']
 
-        optim_class = get_optimizer(config['optimizer'])
-        optimizer = optim_class(model.parameters(), lr=config['lr'], weight_decay=weight_decay)
+        optim_class = get_optimizer(self.config['optimizer'])
+        self.optimizer = optim_class(
+            self.model.parameters(), 
+            lr=self.config['lr'], 
+            weight_decay=weight_decay
+        )
+        
+        # 学习率相关参数
+        self.start_epoch = 0
+        self.lr_step = 0  # current step index of `lr_step`
+        self.lr = self.config['lr']  # current learning step
+        
+    def _load_model_state(self):
+        """加载模型状态"""
+        # 加载多分支模型
+        if self.config['task'] == 'dual_branch_classification':
+            if self.config['load_trajectory_branch']:
+                self.model.trajectory_branch, _, __ = utils.load_model(
+                    self.model.trajectory_branch,
+                    self.config['load_trajectory_branch'],
+                    self.optimizer,
+                    self.config['resume'],
+                    self.config['change_output'],
+                    self.config['lr'],
+                    self.config['lr_step'],
+                    self.config['lr_factor']
+                )
+            if self.config['load_feature_branch']:
+                self.model.feature_branch, _, __ = utils.load_model(
+                    self.model.feature_branch,
+                    self.config['load_feature_branch'],
+                    self.optimizer,
+                    self.config['resume'],
+                    self.config['change_output'],
+                    self.config['lr'],
+                    self.config['lr_step'],
+                    self.config['lr_factor']
+                )
 
-        start_epoch = 0
-        lr_step = 0  # current step index of `lr_step`
-        lr = config['lr']  # current learning step
-        # Load model and optimizer state
-        if config['task'] == 'dual_branch_classification':
-            if config['load_trajectory_branch']:
-                model.trajectory_branch, _, __ = utils.load_model(model.trajectory_branch,
-                                                                  config['load_trajectory_branch'], optimizer,
-                                                                  config['resume'],
-                                                                  config['change_output'],
-                                                                  config['lr'],
-                                                                  config['lr_step'],
-                                                                  config['lr_factor'])
-            if config['load_feature_branch']:
-                model.feature_branch, _, __ = utils.load_model(model.feature_branch,
-                                                               config['load_feature_branch'], optimizer,
-                                                               config['resume'],
-                                                               config['change_output'],
-                                                               config['lr'],
-                                                               config['lr_step'],
-                                                               config['lr_factor'])
+        # 加载完整模型
+        if self.config['load_model']:
+            self.model, self.optimizer, self.start_epoch = utils.load_model(
+                self.model,
+                self.config['load_model'],
+                self.optimizer,
+                self.config['resume'],
+                self.config['change_output'],
+                self.config['lr'],
+                self.config['lr_step'],
+                self.config['lr_factor']
+            )
+        
+        # 将模型移至目标设备
+        self.model.to(self.device)
+        
+    def prepare_data_loaders(self):
+        """准备数据加载器，区分ML和DL模型的需求"""
+        # 设置数据加载器
+        self.dataset_class, self.collate_fn, self.runner_class = pipeline_factory(self.config)
+        
+        # 测试集数据加载器
+        if self.config['test_only'] == 'testset' or self.config['task'] == 'ml_classification':
+            test_dataset = self.dataset_class(self.test_data, self.test_indices)
+            self.test_loader = DataLoader(
+                dataset=test_dataset,
+                batch_size=self.config['batch_size'],
+                shuffle=False,
+                num_workers=self.config['num_workers'],
+                pin_memory=True,
+                collate_fn=lambda x: self.collate_fn(x, )
+            )
+            
+        # 验证集数据加载器
+        val_dataset = self.dataset_class(self.val_data, self.val_indices)
+        self.val_loader = DataLoader(
+            dataset=val_dataset,
+            batch_size=self.config['batch_size'],
+            shuffle=False,
+            num_workers=self.config['num_workers'],
+            pin_memory=True,
+            collate_fn=self.collate_fn
+        )
+        
+        # 训练集数据加载器
+        train_dataset = self.dataset_class(self.train_data, self.train_indices)
+        self.train_loader = DataLoader(
+            dataset=train_dataset,
+            batch_size=self.config['batch_size'],
+            shuffle=True,
+            num_workers=self.config['num_workers'],
+            pin_memory=True,
+            collate_fn=self.collate_fn
+        )
+        
+        # 加速数据加载
+        # logger.info('data loader to list ...')
+        # self.val_loader = list(self.val_loader)
+        # self.train_loader = list(self.train_loader)
+        
+        # 保存数据集引用
+        self.train_dataset = train_dataset
+        
 
-        if config['load_model']:
-            model, optimizer, start_epoch = utils.load_model(model, config['load_model'], optimizer, config['resume'],
-                                                             config['change_output'],
-                                                             config['lr'],
-                                                             config['lr_step'],
-                                                             config['lr_factor'])
-        model.to(device)
-        loss_module = get_loss_module(config)
-
-    # *********** Only evaluate ***********
-    def evaluate_test():
-        test_evaluator = runner_class(model, test_loader, device, loss_module,
-                                      print_interval=config['print_interval'], console=config['console'])
-        aggr_metrics_test, per_batch_test = test_evaluator.evaluate(keep_all=True)
-        print_str = 'Test Summary: '
-        for k, v in aggr_metrics_test.items():
-            if v is not None:
-                print_str += '{}: {:8f} | '.format(k, v)
-        logger.info(print_str)
-        # Export record metrics to a file accumulating records from all experiments
-        utils.register_record(config, config["records_file"], config["initial_timestamp"], config["experiment_name"],
-                              aggr_metrics_test, None, comment=config['comment'])
-
-    if config['test_only'] == 'testset' or config['task'] == 'ml_classification':
-        dataset_class, collate_fn, runner_class = pipeline_factory(config)
-        test_dataset = dataset_class(test_data, test_indices)
-        test_loader = DataLoader(dataset=test_dataset,
-                                 batch_size=config['batch_size'],
-                                 shuffle=False,
-                                 num_workers=config['num_workers'],
-                                 pin_memory=True,
-                                 collate_fn=lambda x: collate_fn(x, ))
-        if config['test_only'] == 'testset' and config['task'] != 'ml_classification':
-            # Only evaluate and skip training
-            evaluate_test()
-            return
-
-    # *********** Initialize data generators ***********
-    dataset_class, collate_fn, runner_class = pipeline_factory(config)
-    val_dataset = dataset_class(val_data, val_indices)
-
-    val_loader = DataLoader(dataset=val_dataset,
-                            batch_size=config['batch_size'],
-                            shuffle=False,
-                            num_workers=config['num_workers'],
-                            pin_memory=True,
-                            collate_fn=collate_fn)
-
-    # not used !!!! construct WeightedRandomSampler,
-    # see https://medium.com/analytics-vidhya/augment-your-data-easily-with-pytorch-313f5808fc8b
-    train_dataset = dataset_class(my_data, train_indices)
-    # train_label_unique, counts = np.unique(train_dataset.labels_df, return_counts=True)
-    # class_weights = [sum(counts) / c for c in counts]
-    # sample_weights = [class_weights[e] for e in train_dataset.labels_df[0]]
-    # sampler = WeightedRandomSampler(sample_weights, len(train_dataset.labels_df[0]))
-    train_loader = DataLoader(dataset=train_dataset,
-                              batch_size=config['batch_size'],
-                              shuffle=True,
-                              num_workers=config['num_workers'],
-                              pin_memory=True,
-                              # sampler=sampler,
-                              collate_fn=collate_fn)
-
-    # *********** TRICKS **********
-    logger.info('data loader to list ...')
-    # note will be automatically shuffled if the DataLoader with  shuffle=True
-    val_loader = list(val_loader)
-    train_loader = list(train_loader)
-
-    if config['task'] == 'ml_classification':
-        run_ml_classification(config['data_name'], test_loader, train_loader, config['test_only'] == 'testset')
-        return
-
-    trainer = runner_class(model, train_loader, device, loss_module, optimizer, l2_reg=output_reg,
-                           print_interval=config['print_interval'], console=config['console'])
-    val_evaluator = runner_class(model, val_loader, device, loss_module,
-                                 print_interval=config['print_interval'], console=config['console'])
-
-    tensorboard_writer = SummaryWriter(config['tensorboard_dir'])
-
-    # dataloader time consumption test
-    if False:
-        with torch.profiler.profile(
-                schedule=torch.profiler.schedule(
-                    wait=2,
-                    warmup=2,
-                    active=6,
-                    repeat=1),
-                on_trace_ready=tensorboard_trace_handler('tmi/'),
-                with_stack=True
-        ) as profiler:
-            t_sum = 0
-            last_time = time.time()
-            for i, data in enumerate(train_loader):
-                t = time.time()
-                t_diff = t - last_time
-                t_sum += t_diff
-                last_time = t
-                logger.info(f't_diff: {t_diff}')
-                profiler.step()
-            logger.info(f't_sum: {t_sum}')
-            exit(0)
-
-    # *********** Train record ***********
-    best_value = 1e16 \
-        if config['key_metric'] in NEG_METRICS else -1e16  # initialize with +inf or -inf depending on key metric
-    metrics = []  # (for validation) list of lists: for each epoch, stores metrics like loss, ...
-    best_metrics = {}
-
-    # *********** Evaluate on validation before training ***********
-    metrics_names = None
-    if config['val_ratio'] > 0:
-        aggr_metrics_val, best_metrics, best_value = validate(val_evaluator, tensorboard_writer, config, best_metrics,
-                                                              best_value, epoch=0)
-        metrics_names, metrics_values = zip(*aggr_metrics_val.items())
-        metrics.append(list(metrics_values))
-    else:
-        if 'classification' in config['task']:
-            metrics_names = ('epoch', 'loss', 'accuracy', 'precision')
-        else:
-            metrics_names = ('epoch', 'loss')
-
-    # *********** Start training ***********
-    logger.info('Starting training...')
-    early_stop = False
-    monitor_on = 'accuracy' if 'classification' in config['task'] else 'loss'
-    early_stopping = EarlyStopping(round(config['patience'] / config['val_interval']), verbose=True,
-                                   monitor_on=monitor_on)
-
-    # with torch.profiler.profile(
-    #         schedule=torch.profiler.schedule(
-    #             wait=2,
-    #             warmup=2,
-    #             active=6,
-    #             repeat=1),
-    #         on_trace_ready=tensorboard_trace_handler('./log'),
-    #         with_stack=True
-    # ) as profiler:
-    #
-    #
-    #         profiler.step()
-
-    for epoch in tqdm(range(start_epoch + 1, config["epochs"] + 1), desc='Training Epoch', leave=False):
-        mark = epoch if config['save_all'] else 'last'
-        epoch_start_time = time.time()
-        aggr_metrics_train = trainer.train_epoch(epoch)  # dictionary of aggregate epoch metrics
-        epoch_runtime = time.time() - epoch_start_time
-
-        print_str = 'Epoch {} Training Summary: '.format(epoch)
-        for k, v in aggr_metrics_train.items():
-            tensorboard_writer.add_scalar('{}/train'.format(k), v, epoch)
-            print_str += '{}: {:8f} | '.format(k, v)
-        logger.info(print_str)
-        logger.info("Epoch runtime: {} hours, {} minutes, {} seconds\n".format(*utils.readable_time(epoch_runtime)))
-        total_epoch_time += epoch_runtime
-        avg_epoch_time = total_epoch_time / (epoch - start_epoch)
-        avg_batch_time = avg_epoch_time / len(train_loader)
-        avg_sample_time = avg_epoch_time / len(train_dataset)
-        logger.info(
-            "Avg epoch train. time: {} hours, {} minutes, {} seconds".format(*utils.readable_time(avg_epoch_time)))
-        logger.info("Avg batch train. time: {} seconds".format(avg_batch_time))
-        logger.info("Avg sample train. time: {} seconds".format(avg_sample_time))
-
-        # evaluate if first or last epoch or at specified interval
-        if config['val_ratio'] > 0 and \
-                ((epoch == config["epochs"]) or (epoch == start_epoch + 1) or (epoch % config['val_interval'] == 0)):
-            aggr_metrics_val, best_metrics, best_value = validate(val_evaluator, tensorboard_writer, config,
-                                                                  best_metrics, best_value, epoch)
+        
+    def evaluate_dl_test(self):
+        """评估深度学习模型在测试集上的性能"""
+        test_evaluator = self.runner_class(
+            self.model, 
+            self.test_loader, 
+            self.device, 
+            self.loss_module,
+            exp_config=self.config
+        )
+        aggr_metrics_test = test_evaluator.evaluate(keep_all=True, return_dfs=True)
+        # 保存分类结果到Excel
+        utils.save_classification_results_to_excel(aggr_metrics_test, self.config['output_dir'])
+        
+    def train_dl_model(self):
+        """训练深度学习模型"""
+        # 初始化训练器和评估器
+        trainer = self.runner_class(
+            self.model, 
+            self.train_loader, 
+            self.device, 
+            self.loss_module, 
+            self.optimizer, 
+            l2_reg=self.output_reg,
+            exp_config=self.config
+        )
+        
+        val_evaluator = self.runner_class(
+            self.model, 
+            self.val_loader, 
+            self.device, 
+            self.loss_module,
+            exp_config=self.config
+        )
+        
+        # 初始化TensorBoard
+        self.tensorboard_writer = SummaryWriter(self.config['tensorboard_dir'])
+        
+        # 初始化训练记录
+        best_value = 1e16 if self.config['key_metric'] in NEG_METRICS else -1e16
+        metrics = []  # 存储每个epoch的验证指标
+        best_metrics = {}
+        
+        # 在训练前先评估验证集
+        metrics_names = None
+        if self.config['val_ratio'] > 0:
+            aggr_metrics_val, best_metrics, best_value = validate(
+                val_evaluator, 
+                self.tensorboard_writer, 
+                self.config, 
+                best_metrics,
+                best_value, 
+                epoch=0
+            )
             metrics_names, metrics_values = zip(*aggr_metrics_val.items())
             metrics.append(list(metrics_values))
+        else:
+            if 'classification' in self.config['task']:
+                metrics_names = ('epoch', 'loss', 'accuracy', 'precision')
+            else:
+                metrics_names = ('epoch', 'loss')
+        
+        # 设置早停
+        monitor_on = 'accuracy' if 'classification' in self.config['task'] else 'loss'
+        early_stopping = EarlyStopping(
+            round(self.config['patience'] / self.config['val_interval']), 
+            verbose=True,
+            monitor_on=monitor_on
+        )
+        
+        # 开始训练循环
+        logger.info('Starting training...')
+        early_stop = False
+        
+        for epoch in tqdm(range(self.start_epoch + 1, self.config["epochs"] + 1), desc='Training Epoch', leave=False):
+            # 设置保存标记
+            mark = epoch if self.config['save_all'] else 'last'
+            
+            # 训练一个epoch
+            epoch_start_time = time.time()
+            aggr_metrics_train = trainer.train_epoch(epoch)
+            epoch_runtime = time.time() - epoch_start_time
+            
+            # 记录训练指标
+            print_str = 'Epoch {} Training Summary: '.format(epoch)
+            for k, v in aggr_metrics_train.items():
+                self.tensorboard_writer.add_scalar('{}/train'.format(k), v, epoch)
+                print_str += '{}: {:8f} | '.format(k, v)
+            logger.info(print_str)
+            
+            # 记录时间信息
+            logger.info("Epoch runtime: {} hours, {} minutes, {} seconds\n".format(
+                *utils.readable_time(epoch_runtime))
+            )
+            self.total_epoch_time += epoch_runtime
+            avg_epoch_time = self.total_epoch_time / (epoch - self.start_epoch)
+            avg_batch_time = avg_epoch_time / len(self.train_loader)
+            avg_sample_time = avg_epoch_time / len(self.train_dataset)
+            
+            logger.info("Avg epoch train. time: {} hours, {} minutes, {} seconds".format(
+                *utils.readable_time(avg_epoch_time))
+            )
+            logger.info("Avg batch train. time: {} seconds".format(avg_batch_time))
+            logger.info("Avg sample train. time: {} seconds".format(avg_sample_time))
+            
+            # 定期在验证集上评估
+            if self.config['val_ratio'] > 0 and \
+                    ((epoch == self.config["epochs"]) or 
+                     (epoch == self.start_epoch + 1) or 
+                     (epoch % self.config['val_interval'] == 0)):
+                aggr_metrics_val, best_metrics, best_value = validate(
+                    val_evaluator, 
+                    self.tensorboard_writer, 
+                    self.config,
+                    best_metrics, 
+                    best_value, 
+                    epoch
+                )
+                metrics_names, metrics_values = zip(*aggr_metrics_val.items())
+                metrics.append(list(metrics_values))
+                
+                # 检查早停条件
+                if early_stopping(aggr_metrics_val[monitor_on]).early_stop:
+                    early_stop = True
+                    logger.warning('early stopping reached')
+            
+            # 保存模型
+            utils.save_model(
+                os.path.join(self.config['save_dir'], 'model_{}.pth'.format(mark)), 
+                epoch, 
+                self.model, 
+                self.optimizer
+            )
+            
+            if early_stop:
+                logger.warning('stopping training...')
+                break
+                
+            # 学习率调度
+            self._adjust_learning_rate(epoch)
+            
+        return metrics, metrics_names, best_metrics, best_value, aggr_metrics_val
+    
+    def _adjust_learning_rate(self, epoch):
+        """调整学习率"""
+        if epoch == self.config['lr_step'][self.lr_step]:
+            # 在学习率改变时保存模型
+            utils.save_model(
+                os.path.join(self.config['save_dir'], 'model_{}.pth'.format(epoch)), 
+                epoch, 
+                self.model,
+                self.optimizer
+            )
+            
+            # 更新学习率
+            self.lr = self.lr * self.config['lr_factor'][self.lr_step]
+            if self.lr_step < len(self.config['lr_step']) - 1:
+                self.lr_step += 1
+                
+            logger.info('Learning rate updated to: {}'.format(self.lr))
+            
+            # 应用新的学习率
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = self.lr
+                
+    def export_dl_train_history(self, metrics, metrics_names, best_metrics,
+                                 best_value, aggr_metrics_val):
+        """导出训练结果"""
+        # 导出性能指标
+        metrics_filepath = os.path.join(
+            self.config["output_dir"], 
+            "metrics_history_" + self.config["experiment_name"] + ".xls"
+        )
+        book = utils.export_performance_metrics(
+            metrics_filepath, 
+            metrics, 
+            metrics_names, 
+            sheet_name="metrics"
+        )
+        
+        # 记录实验结果
+        utils.register_record(
+            self.config, 
+            self.config["records_file"], 
+            self.config["initial_timestamp"], 
+            self.config["experiment_name"],
+            best_metrics, 
+            aggr_metrics_val
+        )
+        
+        # 记录最佳性能
+        logger.info('Best {} was {}. Other metrics: {}'.format(
+            self.config['key_metric'], 
+            best_value, 
+            str(best_metrics)
+        ))
+        
+    def setup_ml_model(self):
+        """设置机器学习模型"""
+        logger.info("创建机器学习模型...")
+        
+        # 初始化MLClassifier
+        self.ml_classifier = MLClassifier(self.config)
+        
+        logger.info("机器学习模型将在训练阶段通过网格搜索创建")
+        
+        # 创建模型保存目录
+        self.ml_model_dir = os.path.join(self.config['save_dir'], 'ml_models')
+        if not os.path.exists(self.ml_model_dir):
+            os.makedirs(self.ml_model_dir)
+            
+        logger.info(f"机器学习模型将保存在: {self.ml_model_dir}")
+    
+    def _prepare_ml_data(self, data_loader):
+        """辅助方法：从dataloader中准备机器学习所需的数据
+        
+        Args:
+            data_loader: DataLoader实例
+            
+        Returns:
+            tuple: (特征数据X, 标签数据y)
+        """
+        batches = [(batch[0].numpy(), batch[1].numpy()) for batch in data_loader]
+        X = np.vstack([batch[0] for batch in batches])
+        y = np.vstack([batch[1] for batch in batches])
+        return X, y
 
-            if early_stopping(aggr_metrics_val[monitor_on]).early_stop:
-                early_stop = True
-                logger.warning('early stopping reached')
+    def train_ml_model(self):
+        """训练机器学习模型并在验证集上评估"""
+        logger.info("准备机器学习训练数据...")
+        
+        # 准备训练和验证数据
+        X_train, y_train = self._prepare_ml_data(self.train_loader)
+        X_val, y_val = self._prepare_ml_data(self.val_loader)
+        
+        # 计算手工特征
+        logger.info("计算手工特征...")
+        x_handcrafted_train = self.ml_classifier.calc_handcrafted_features(X_train)
+        x_handcrafted_val = self.ml_classifier.calc_handcrafted_features(X_val)
+        
+        # 训练模型
+        logger.info("开始训练机器学习模型...")
+        best_models, best_scores = self.ml_classifier.train_ml_models(
+            x_handcrafted_train, 
+            x_handcrafted_val, 
+            y_train, 
+            y_val
+        )
+        
+        logger.info("机器学习模型训练完成!")
+        return best_models, best_scores
+    
+    def evaluate_ml_test(self):
+        """评估机器学习模型在测试集上的性能"""
+        logger.info("准备机器学习测试数据...")
+        
+        # 准备测试数据
+        X_test, y_test = self._prepare_ml_data(self.test_loader)
+        
+        # 计算手工特征
+        x_handcrafted_test = self.ml_classifier.calc_handcrafted_features(X_test)
+        
+        # 评估模型
+        logger.info("在测试集上评估机器学习模型...")
+        test_results = self.ml_classifier.evaluate_ml_models(
+            x_handcrafted_test, 
+            y_test
+        )
+        
+        logger.info("机器学习模型评估完成!")
+        return test_results
 
-        utils.save_model(os.path.join(config['save_dir'], 'model_{}.pth'.format(mark)), epoch, model, optimizer)
-        utils.save_model(os.path.join('experiments', 'tmp', config['data_class'] + '_model_last.pth'), epoch, optimizer)
+    def run(self):
+        """运行整个训练流程，根据任务类型区分ML和DL"""
+        # 1. 加载和预处理数据
+        self.setup_data()
+        
+        # 2. 准备数据加载器
+        self.prepare_data_loaders()
+        
+        # 3. 根据任务类型执行不同操作
+        if self.config['task'] == 'ml_classification':
+            # 机器学习分类任务流程
+            logger.info('执行机器学习分类任务...')
+            
+            # 设置机器学习模型
+            self.setup_ml_model()
+            
+            if self.config['test_only'] == 'testset':
+                # 仅在测试集上评估机器学习模型
+                test_results = self.evaluate_ml_test()
+                logger.info('机器学习模型测试完成!')
+                return
+            
+            # 训练机器学习模型
+            best_models, best_scores = self.train_ml_model()
+            
+            # # 在测试集上评估
+            # test_results = self.evaluate_ml_test()
+            
+            # 完成
+            logger.info('机器学习分类完成!')
+        else:
+            # 深度学习模型流程
+            logger.info('执行深度学习模型训练/测试...')
+            
+            # 创建深度学习模型
+            self.setup_dl_model()
+            
+            if self.config['test_only'] == 'testset':
+                # 仅在测试集上评估深度学习模型
+                self.evaluate_dl_test()
+                logger.info('深度学习模型测试完成!')
+                return
+            
+            # 训练深度学习模型
+            metrics, metrics_names, best_metrics, best_value, aggr_metrics_val = self.train_dl_model()
+            
+            # 导出结果
+            self.export_dl_train_history(metrics, metrics_names, best_metrics, best_value, aggr_metrics_val)
+            
+            # 完成
+            logger.info('深度学习模型训练完成!')
+        
+        # 记录总运行时间
+        total_runtime = time.time() - self.total_start_time
+        logger.info("总运行时间: {} 小时, {} 分钟, {} 秒\n".format(*utils.readable_time(total_runtime)))
+        
 
-        if early_stop:
-            logger.warning('stopping training...')
-            break
 
-        # Learning rate scheduling
-        if epoch == config['lr_step'][lr_step]:
-            utils.save_model(os.path.join(config['save_dir'], 'model_{}.pth'.format(epoch)), epoch, model,
-                             optimizer)
-            lr = lr * config['lr_factor'][lr_step]
-            if lr_step < len(config['lr_step']) - 1:  # so that this index does not get out of bounds
-                lr_step += 1
-            logger.info('Learning rate updated to: ', lr)
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = lr
-
-        # Difficulty scheduling
-        if config['harden'] and check_progress(epoch):
-            train_loader.dataset.update()
-            val_loader.dataset.update()
-
-    # *********** Results ***********
-    # Export evolution of metrics over epochs
-    # if 'classification' in config['task']:
-    #     model =
-    #     evaluate_test()
-    header = metrics_names
-    metrics_filepath = os.path.join(config["output_dir"], "metrics_" + config["experiment_name"] + ".xls")
-    book = utils.export_performance_metrics(metrics_filepath, metrics, header, sheet_name="metrics")
-
-    # Export record metrics to a file accumulating records from all experiments
-    utils.register_record(config, config["records_file"], config["initial_timestamp"], config["experiment_name"],
-                          best_metrics, aggr_metrics_val, comment=config['comment'])
-
-    logger.info('Best {} was {}. Other metrics: {}'.format(config['key_metric'], best_value, str(best_metrics)))
-    logger.info('All Done!')
-
-    total_runtime = time.time() - total_start_time
-    logger.info("Total runtime: {} hours, {} minutes, {} seconds\n".format(*utils.readable_time(total_runtime)))
-
-    return best_value
+def main(config):
+    """主函数，初始化和运行训练流程"""
+    pipeline = TrainingPipeline(config)
+    return pipeline.run()
 
 
 if __name__ == '__main__':
@@ -405,8 +632,4 @@ if __name__ == '__main__':
     config = setup(args)  # configuration dictionary
     dataset.config = config
     cudnn.benchmark = True
-    torch.set_num_interop_threads(16)
-    torch.set_num_threads(16)
-    #  paper: Torch.manual_seed(3407) is all you need: On the influence of random seeds in deep learning architectures for computer vision
-    # torch.manual_seed(3407)
     main(config)

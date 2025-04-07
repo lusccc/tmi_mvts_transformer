@@ -17,8 +17,6 @@ class Options(object):
         # I/O
         self.parser.add_argument('--output_dir', default='./output',
                                  help='Root output directory. Must exist. Time-stamped directories will be created inside.')
-        self.parser.add_argument('--data_dir', default='./data',
-                                 help='Data directory')
         self.parser.add_argument('--load_model',
                                  help='Path to pre-trained model.')
         self.parser.add_argument('--resume', action='store_true',
@@ -27,11 +25,8 @@ class Options(object):
                                  help='Whether the loaded model will be fine-tuned on a different task (necessitating a different output layer)')
         self.parser.add_argument('--save_all', action='store_true',
                                  help='If set, will save model weights (and optimizer state) for every epoch; otherwise just latest')
-        self.parser.add_argument('--name', dest='experiment_name', default='',
+        self.parser.add_argument('--experiment_name', default='',
                                  help='A string identifier/name for the experiment to be run - it will be appended to the output directory name, before the timestamp')
-        self.parser.add_argument('--comment', type=str, default='', help='A comment/description of the experiment')
-        self.parser.add_argument('--no_timestamp', action='store_true',
-                                 help='If set, a timestamp will not be appended to the output directory name')
         self.parser.add_argument('--records_file', default='./records.xls',
                                  help='Excel file keeping all records of experiments')
         # System
@@ -54,65 +49,30 @@ class Options(object):
                                       "otherwise as an integer absolute number of samples")
         self.parser.add_argument('--test_only', choices={'testset', 'fold_transduction'},
                                  help='If set, no training will take place; instead, trained model will be loaded and evaluated on test set')
-        self.parser.add_argument('--data_name', type=str,
-                                 )
+        self.parser.add_argument('--data_name', type=str, help='dataset name')
         self.parser.add_argument('--data_class', type=str,
                                  choices={'feature', 'trajectory', 'trajectory_with_feature'},
                                  help="Which type of data should be processed.")
-        self.parser.add_argument('--labels', type=str,
-                                 help="In case a dataset contains several labels (multi-task), "
-                                      "which type of labels should be used in regression or classification, i.e. name of column(s).")
-        self.parser.add_argument('--test_from',
-                                 help='If given, will read test IDs from specified text file containing sample IDs one in each row')
-        self.parser.add_argument('--test_ratio', type=float, default=0,
-                                 help="Set aside this proportion of the dataset as a test set")
+        # already split in s2 step!
+        # self.parser.add_argument('--test_ratio', type=float, default=0,
+        #                          help="Set aside this proportion of the dataset as a test set")
         self.parser.add_argument('--val_ratio', type=float, default=0.2,
                                  help="Proportion of the dataset to be used as a validation set")
-        self.parser.add_argument('--pattern', type=str,
-                                 help='Regex pattern used to select files contained in `data_dir`. If None, all data will be used.')
-        self.parser.add_argument('--val_pattern', type=str,
-                                 help="""Regex pattern used to select files contained in `data_dir` exclusively for the validation set.
-                            If None, a positive `val_ratio` will be used to reserve part of the common data set.""")
-        self.parser.add_argument('--test_pattern', type=str,
-                                 help="""Regex pattern used to select files contained in `data_dir` exclusively for the test set.
-                            If None, `test_ratio`, if specified, will be used to reserve part of the common data set.""")
-        self.parser.add_argument('--normalization',
-                                 choices={'standardization', 'minmax', 'per_sample_std', 'per_sample_minmax'},
-                                 default='standardization',
-                                 help='If specified, will apply normalization on the input features of a dataset.')
-        self.parser.add_argument('--norm_from',
-                                 help="""If given, will read normalization values (e.g. mean, std, min, max) from specified pickle file.
-                            The columns correspond to features, rows correspond to mean, std or min, max.""")
-        self.parser.add_argument('--subsample_factor', type=int,
-                                 help='Sub-sampling factor used for long sequences: keep every kth sample')
+
+        # already specified in data.py
+        # self.parser.add_argument('--normalization',
+        #                          choices={'standardization', 'minmax', 'per_sample_std', 'per_sample_minmax'},
+        #                          default='standardization',
+        #                          help='If specified, will apply normalization on the input features of a dataset.')
+
         # Training process
         self.parser.add_argument('--task',
                                  help=("Training objective/task: imputation of masked values,\n"
                                        "                          transduction of features to other features,\n"
                                        "                          classification of entire time series,\n"
                                        "                          regression of scalar(s) for entire time series"))
-        self.parser.add_argument('--masking_ratio', type=float, default=0.15,
-                                 help='Imputation: mask this proportion of each variable')
-        self.parser.add_argument('--mean_mask_length', type=float, default=3,
-                                 help="Imputation: the desired mean length of masked segments. Used only when `mask_distribution` is 'geometric'.")
-        self.parser.add_argument('--mask_mode', choices={'separate', 'concurrent'}, default='separate',
-                                 help=("Imputation: whether each variable should be masked separately "
-                                       "or all variables at a certain positions should be masked concurrently"))
-        self.parser.add_argument('--mask_distribution', choices={'geometric', 'bernoulli'}, default='geometric',
-                                 help=(
-                                     "Imputation: whether each mask sequence element is sampled independently at random"
-                                     "or whether sampling follows a markov chain (stateful), resulting in "
-                                     "geometric distributions of masked squences of a desired mean_mask_length"))
         self.parser.add_argument('--exclude_feats', type=str, default=None,
                                  help='Imputation: Comma separated string of indices corresponding to features to be excluded from masking')
-        self.parser.add_argument('--mask_feats', type=str, default='0, 1',
-                                 help='Transduction: Comma separated string of indices corresponding to features to be masked')
-        self.parser.add_argument('--start_hint', type=float, default=0.0,
-                                 help='Transduction: proportion at the beginning of time series which will not be masked')
-        self.parser.add_argument('--end_hint', type=float, default=0.0,
-                                 help='Transduction: proportion at the end of time series which will not be masked')
-        self.parser.add_argument('--harden', action='store_true',
-                                 help='Makes training objective progressively harder, by masking more of the input')
 
         self.parser.add_argument('--epochs', type=int, default=400,
                                  help='Number of training epochs')
@@ -134,8 +94,6 @@ class Options(object):
                                  help='L2 weight regularization parameter')
         self.parser.add_argument('--global_reg', action='store_true',
                                  help='If set, L2 regularization will be applied to all weights instead of only the output layer')
-        self.parser.add_argument('--key_metric', choices={'loss', 'accuracy', 'precision'}, default='loss',
-                                 help='Metric used for defining best epoch')
         self.parser.add_argument('--freeze', action='store_true',
                                  help='If set, freezes all layer parameters except for the output layer. Also removes dropout except before the output layer')
 
@@ -169,8 +127,8 @@ class Options(object):
         self.parser.add_argument('--feature_branch_hyperparams', type=str, default=None)
         self.parser.add_argument('--load_trajectory_branch', type=str, default=None)
         self.parser.add_argument('--load_feature_branch', type=str, default=None)
-        self.parser.add_argument('--input_type',  choices={"mix", "clean", "noise"}, default='mix')
-        self.parser.add_argument('--disable_mask', action='store_true',)
+        self.parser.add_argument('--input_type', default='50%noise')
+        self.parser.add_argument('--disable_mask', action='store_true', )
         '''
         0        1     2         3         4             5     6        7               8 
         delta_t, hour, distance, velocity, acceleration, jerk, heading, heading_change, heading_change_rate
@@ -178,6 +136,8 @@ class Options(object):
         self.parser.add_argument('--motion_features', type=str, default='3,4,5,8')
         self.parser.add_argument('--patience', type=int, default=60)
         self.parser.add_argument('--emb_size', type=int, default=64)
+        self.parser.add_argument('--class_names', type=str, default="Walk,Bike,Bus,Car,Train",
+                                  help='逗号分隔的类别名称列表，按索引顺序对应标签值')
 
     def parse(self):
 
@@ -192,11 +152,13 @@ class Options(object):
 
         if args.exclude_feats is not None:
             args.exclude_feats = [int(i) for i in args.exclude_feats.split(',')]
-        args.mask_feats = [int(i) for i in args.mask_feats.split(',')]
-
-        if args.val_pattern is not None:
-            args.val_ratio = 0
-            args.test_ratio = 0
 
         args.motion_features = [int(item) for item in args.motion_features.split(',')]
+        
+        args.key_metric = 'accuracy' if 'classification' in args.task else 'loss'
+        
+        # 处理类别名称
+        if args.class_names is not None:
+            args.class_names = args.class_names.split(',')
+        
         return args

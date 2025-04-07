@@ -75,8 +75,8 @@ if __name__ == '__main__':
      mode index from SHL is differ from geolife, will be transform to be same as geolife
     '''
     parser.add_argument('--use_modes', type=str, default='2,4,6,5,7') # TODO 8 actually not used!
-    parser.add_argument('--data_dir', type=str, default='/mnt/xs/DATASET/SHLDataset_User1Hips_v1/release/User1')
-    parser.add_argument('--save_dir', type=str, default='./data/SHL_extracted/')
+    parser.add_argument('--data_dir', type=str, default='/mnt/f/tmi-code/DATASET/SHLDataset_User1Hips_v1/release/User1')
+    parser.add_argument('--save_dir', type=str, default='../../data/SHL_extracted/')
 
     args = parser.parse_args()
 
@@ -88,7 +88,7 @@ if __name__ == '__main__':
     trjs = []
     trjs_labels = []
     read_all_folders(args.data_dir)
-    trjs = np.array(trjs)
+    trjs = np.array(trjs, dtype=object)
     labels = np.array(trjs_labels)
     trjs, labels = shuffle(trjs, labels, random_state=10086)  # note: shuffles here !!
     # trjs = trjs[:200]

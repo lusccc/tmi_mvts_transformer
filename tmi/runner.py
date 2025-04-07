@@ -76,18 +76,16 @@ def setup(args):
     # Create output directory
     initial_timestamp = datetime.now()
     output_dir = config['output_dir']
+    # 如果输出目录不存在则创建
     if not os.path.isdir(output_dir):
-        raise IOError(
-            "Root directory '{}', where the directory of the experiment will be created, must exist".format(output_dir))
-
-    output_dir = os.path.join(output_dir, config['experiment_name'])
-
+        os.makedirs(output_dir)
+    # output_dir = os.path.join(output_dir, config['experiment_name'])
     formatted_timestamp = initial_timestamp.strftime("%Y-%m-%d_%H-%M-%S")
     config['initial_timestamp'] = formatted_timestamp
-    if (not config['no_timestamp']) or (len(config['experiment_name']) == 0):
-        rand_suffix = "".join(random.choices(string.ascii_letters + string.digits, k=3))
-        output_dir += "_" + formatted_timestamp + "_" + rand_suffix
-    config['output_dir'] = output_dir
+    # if (not config['no_timestamp']) or (len(config['experiment_name']) == 0):
+    #     rand_suffix = "".join(random.choices(string.ascii_letters + string.digits, k=3))
+    #     output_dir += "_" + formatted_timestamp + "_" + rand_suffix
+    # config['output_dir'] = output_dir
     config['save_dir'] = os.path.join(output_dir, 'checkpoints')
     config['pred_dir'] = os.path.join(output_dir, 'predictions')
     config['tensorboard_dir'] = os.path.join(output_dir, 'tb_summaries')
@@ -101,76 +99,6 @@ def setup(args):
     logger.info("Stored configuration file in '{}'".format(output_dir))
 
     return config
-
-
-def fold_evaluate(dataset, model, device, loss_module, target_feats, config, dataset_name):
-    allfolds = {'target_feats': target_feats,
-                # list of len(num_folds), each element: list of target feature integer indices
-                'predictions': [],
-                # list of len(num_folds), each element: (num_samples, seq_len, feat_dim) prediction per sample
-                'targets': [],
-                # list of len(num_folds), each element: (num_samples, seq_len, feat_dim) target/original input per sample
-                'target_masks': [],
-                # list of len(num_folds), each element: (num_samples, seq_len, feat_dim) boolean mask per sample
-                'metrics': [],  # list of len(num_folds), each element: (num_samples, num_metrics) metric per sample
-                'IDs': []}  # list of len(num_folds), each element: (num_samples,) ID per sample
-
-    for i, tgt_feats in enumerate(target_feats):
-
-        dataset.mask_feats = tgt_feats  # set the transduction target features
-
-        loader = DataLoader(dataset=dataset,
-                            batch_size=config['batch_size'],
-                            shuffle=False,
-                            num_workers=config['num_workers'],
-                            pin_memory=True,
-                            collate_fn=lambda x: collate_denoising_unsuperv(x, max_len=config['max_seq_len']))
-
-        evaluator = UnsupervisedRunner(model, loader, device, loss_module,
-                                       print_interval=config['print_interval'], console=config['console'])
-
-        logger.info("Evaluating {} set, fold: {}, target features: {}".format(dataset_name, i, tgt_feats))
-        aggr_metrics, per_batch = evaluate(evaluator)
-
-        metrics_array = convert_metrics_per_batch_to_per_sample(per_batch['metrics'], per_batch['target_masks'])
-        metrics_array = np.concatenate(metrics_array, axis=0)
-        allfolds['metrics'].append(metrics_array)
-        allfolds['predictions'].append(np.concatenate(per_batch['predictions'], axis=0))
-        allfolds['targets'].append(np.concatenate(per_batch['targets'], axis=0))
-        allfolds['target_masks'].append(np.concatenate(per_batch['target_masks'], axis=0))
-        allfolds['IDs'].append(np.concatenate(per_batch['IDs'], axis=0))
-
-        metrics_mean = np.mean(metrics_array, axis=0)
-        metrics_std = np.std(metrics_array, axis=0)
-        for m, metric_name in enumerate(list(aggr_metrics.items())[1:]):
-            logger.info("{}:: Mean: {:.3f}, std: {:.3f}".format(metric_name, metrics_mean[m], metrics_std[m]))
-
-    pred_filepath = os.path.join(config['pred_dir'], dataset_name + '_fold_transduction_predictions.pickle')
-    logger.info("Serializing predictions into {} ... ".format(pred_filepath))
-    with open(pred_filepath, 'wb') as f:
-        pickle.dump(allfolds, f, pickle.HIGHEST_PROTOCOL)
-
-
-def convert_metrics_per_batch_to_per_sample(metrics, target_masks):
-    """
-    Args:
-        metrics: list of len(num_batches), each element: list of len(num_metrics), each element: (num_active_in_batch,) metric per element
-        target_masks: list of len(num_batches), each element: (batch_size, seq_len, feat_dim) boolean mask: 1s active, 0s ignore
-    Returns:
-        metrics_array = list of len(num_batches), each element: (batch_size, num_metrics) metric per sample
-    """
-    metrics_array = []
-    for b, batch_target_masks in enumerate(target_masks):
-        num_active_per_sample = np.sum(batch_target_masks, axis=(1, 2))
-        batch_metrics = np.stack(metrics[b], axis=1)  # (num_active_in_batch, num_metrics)
-        ind = 0
-        metrics_per_sample = np.zeros((len(num_active_per_sample), batch_metrics.shape[1]))  # (batch_size, num_metrics)
-        for n, num_active in enumerate(num_active_per_sample):
-            new_ind = ind + num_active
-            metrics_per_sample[n, :] = np.sum(batch_metrics[ind:new_ind, :], axis=0)
-            ind = new_ind
-        metrics_array.append(metrics_per_sample)
-    return metrics_array
 
 
 def evaluate(evaluator):
@@ -226,12 +154,6 @@ def validate(val_evaluator, tensorboard_writer, config, best_metrics, best_value
     if condition:
         best_value = aggr_metrics[config['key_metric']]
         utils.save_model(os.path.join(config['save_dir'], 'model_best.pth'), epoch, val_evaluator.model)
-        # save to tmp, to make convenient train as pipline in shell
-        try:
-            utils.save_model(os.path.join('experiments', 'tmp', config['data_class'] + '_model_best.pth'), epoch,
-                             val_evaluator.model)
-        except:
-            logger.error('no tmp dir!')
         best_metrics = aggr_metrics.copy()
 
         pred_filepath = os.path.join(config['pred_dir'], 'best_predictions')
@@ -249,16 +171,19 @@ def check_progress(epoch):
 
 class BaseRunner(object):
 
-    def __init__(self, model, dataloader, device, loss_module, optimizer=None, l2_reg=None, print_interval=10,
-                 console=True):
+    def __init__(self, model, dataloader, device, loss_module, optimizer=None, 
+                 l2_reg=None, exp_config=None):
         self.model = model
         self.dataloader = dataloader
         self.device = device
         self.optimizer = optimizer
         self.loss_module = loss_module
         self.l2_reg = l2_reg
-        self.print_interval = print_interval
-        self.printer = utils.Printer(console=console)
+
+        self.exp_config = exp_config
+        self.print_interval = self.exp_config['print_interval']
+        self.printer = utils.Printer(console=self.exp_config['console'])
+
         self.epoch_metrics = OrderedDict()
 
     def train_epoch(self, epoch_num=None):
@@ -493,7 +418,7 @@ class SupervisedRunner(BaseRunner):
         self.epoch_metrics['loss'] = epoch_loss
         return self.epoch_metrics
 
-    def evaluate(self, epoch_num=None, keep_all=True):
+    def evaluate(self, epoch_num=None, keep_all=True, return_dfs=False):
 
         self.model = self.model.eval()
 
@@ -541,9 +466,13 @@ class SupervisedRunner(BaseRunner):
         predictions = torch.argmax(probs, dim=1).cpu().numpy()  # (total_samples,) int class index for each sample
         probs = probs.cpu().numpy()
         targets = np.concatenate(per_batch['targets'], axis=0).flatten()
-        class_names = np.arange(probs.shape[1])  # TODO: temporary until I decide how to pass class names
 
-        metrics_dict = self.analyzer.analyze_classification(predictions, targets, class_names)
+        class_names = self.exp_config['class_names']
+
+        metrics_dict = self.analyzer.analyze_classification(predictions, targets, class_names, return_dfs=return_dfs)
+
+        if return_dfs:
+            return metrics_dict
 
         self.epoch_metrics['accuracy'] = metrics_dict['total_accuracy']  # same as average recall over all classes
         self.epoch_metrics['precision'] = metrics_dict['prec_avg']  # average precision over all classes
