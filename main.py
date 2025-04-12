@@ -2,6 +2,10 @@ import json
 import os
 import sys
 import time
+import pickle
+import logging
+import argparse
+import datetime
 
 import numpy as np
 import pandas as pd
@@ -31,6 +35,15 @@ from tmi.runner import setup, pipeline_factory, validate, check_progress, NEG_ME
 from tmi.training_tools import EarlyStopping
 from tmi.utils import utils
 
+import multiprocessing as mp
+from functools import partial
+
+# 处理程序终止信号的导入
+import signal
+import sys
+
+# 处理指标的常量
+NEG_METRICS = {'loss', 'mse', }
 
 class TrainingPipeline:
     def __init__(self, config):
@@ -142,8 +155,7 @@ class TrainingPipeline:
                 }, f, indent=4)
     
     def _preprocess_features(self):
-        """预处理特征"""
-        for (train_df, train_normalization), (test_df, test_normalization) in zip(
+         for (train_df, train_normalization), (test_df, test_normalization) in zip(
                 self.train_data.feature_dfs, self.test_data.feature_dfs):
             normalizer = Normalizer(train_normalization)
             train_df.loc[self.train_indices] = normalizer.normalize(train_df.loc[self.train_indices])
@@ -151,15 +163,27 @@ class TrainingPipeline:
                 train_df.loc[self.val_indices] = normalizer.normalize(train_df.loc[self.val_indices])
             test_df.loc[self.test_indices] = normalizer.normalize(test_df.loc[self.test_indices])
 
+
     def setup_dl_model(self):
         """创建和初始化深度学习模型"""
         logger.info("Creating model ...")
         self.model = model_factory(self.config, self.train_data)
 
+        # 检查DualTSTransformerEncoderClassifier模型结构
+        from tmi.models.models import DualTSTransformerEncoderClassifier
+        if isinstance(self.model, DualTSTransformerEncoderClassifier):
+            logger.info("检测到DualTSTransformerEncoderClassifier模型，进行结构检查")
+            utils.ensure_dual_branch_model_structure(self.model)
+
         # 设置冻结层
         if self.config['freeze']:
             for name, param in self.model.named_parameters():
+                # 允许所有output_layer相关的参数都可训练
                 if 'output_layer' in name:
+                    logger.info(f'set layer {name} requires_grad = True')
+                    param.requires_grad = True
+                # 允许所有encoder输出层相关的参数也可训练
+                elif any(x in name for x in ['encoder1_output_layer', 'encoder2_output_layer']):
                     logger.info(f'set layer {name} requires_grad = True')
                     param.requires_grad = True
                 else:
@@ -229,16 +253,27 @@ class TrainingPipeline:
 
         # 加载完整模型
         if self.config['load_model']:
-            self.model, self.optimizer, self.start_epoch = utils.load_model(
-                self.model,
-                self.config['load_model'],
-                self.optimizer,
-                self.config['resume'],
-                self.config['change_output'],
-                self.config['lr'],
-                self.config['lr_step'],
-                self.config['lr_factor']
-            )
+            # 检查是否为双分支模型
+            from tmi.models.models import DualTSTransformerEncoderClassifier
+            if isinstance(self.model, DualTSTransformerEncoderClassifier):
+                logger.info("检测到DualTSTransformerEncoderClassifier模型，使用专用加载函数")
+                self.model, self.optimizer, self.start_epoch = utils.load_dual_branch_model(
+                    self.model,
+                    self.config['load_model'],
+                    self.optimizer,
+                    self.config['resume']
+                )
+            else:
+                self.model, self.optimizer, self.start_epoch = utils.load_model(
+                    self.model,
+                    self.config['load_model'],
+                    self.optimizer,
+                    self.config['resume'],
+                    self.config['change_output'],
+                    self.config['lr'],
+                    self.config['lr_step'],
+                    self.config['lr_factor']
+                )
         
         # 将模型移至目标设备
         self.model.to(self.device)
@@ -247,6 +282,15 @@ class TrainingPipeline:
         """准备数据加载器，区分ML和DL模型的需求"""
         # 设置数据加载器
         self.dataset_class, self.collate_fn, self.runner_class = pipeline_factory(self.config)
+        
+        # 创建缓存目录
+        cache_dir = f'./data/dataloader_cache/{self.config["data_name"]}/{self.config["data_class"]}'
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        # 缓存文件路径 - 包含batch_size信息
+        batch_size = self.config['batch_size']
+        val_cache_path = os.path.join(cache_dir, f'val_loader_bs{batch_size}.pkl')
+        train_cache_path = os.path.join(cache_dir, f'train_loader_bs{batch_size}.pkl')
         
         # 测试集数据加载器
         if self.config['test_only'] == 'testset' or self.config['task'] == 'ml_classification':
@@ -279,31 +323,139 @@ class TrainingPipeline:
             shuffle=True,
             num_workers=self.config['num_workers'],
             pin_memory=True,
-            collate_fn=self.collate_fn
+            collate_fn=self.collate_fn,
+            persistent_workers=True
         )
-        
-        # 加速数据加载
-        # logger.info('data loader to list ...')
-        # self.val_loader = list(self.val_loader)
-        # self.train_loader = list(self.train_loader)
-        
+
+        # 会有bug，不同任务datasetclass还不一样！
+        # # 加载或创建验证集缓存
+        # if os.path.exists(val_cache_path):
+        #     logger.info(f"从缓存加载验证集: {val_cache_path}")
+        #     with open(val_cache_path, 'rb') as f:
+        #         self.val_loader = pickle.load(f)
+        # else:
+        #     logger.info("创建验证集缓存...")
+        #     self.val_loader = list(self.val_loader)
+        #     with open(val_cache_path, 'wb') as f:
+        #         pickle.dump(self.val_loader, f)
+        #
+        # # 加载或创建训练集缓存
+        # if os.path.exists(train_cache_path):
+        #     logger.info(f"从缓存加载训练集: {train_cache_path}")
+        #     with open(train_cache_path, 'rb') as f:
+        #         self.train_loader = pickle.load(f)
+        # else:
+        #     logger.info("创建训练集缓存...")
+        #     self.train_loader = list(self.train_loader)
+        #     with open(train_cache_path, 'wb') as f:
+        #         pickle.dump(self.train_loader, f)
+
+        self.val_loader = list(self.val_loader)
+        self.train_loader = list(self.train_loader)
         # 保存数据集引用
         self.train_dataset = train_dataset
         
-
-        
     def evaluate_dl_test(self):
         """评估深度学习模型在测试集上的性能"""
-        test_evaluator = self.runner_class(
-            self.model, 
-            self.test_loader, 
-            self.device, 
-            self.loss_module,
-            exp_config=self.config
-        )
-        aggr_metrics_test = test_evaluator.evaluate(keep_all=True, return_dfs=True)
-        # 保存分类结果到Excel
-        utils.save_classification_results_to_excel(aggr_metrics_test, self.config['output_dir'])
+        
+        # 检查是否需要遍历多个noise level进行测试
+        if self.config.get('noise_level_sweep', False):
+            # 定义要测试的noise level列表
+            noise_levels = ['0%noise', '10%noise', '20%noise', '30%noise', '40%noise', 
+                           '50%noise', '60%noise', '70%noise', '80%noise', '90%noise', '100%noise']
+            
+            # 创建结果汇总表
+            all_results = {
+                'noise_level': [],
+                'accuracy': [],
+                'precision': [],
+                'recall': [],
+                'f1_score': []
+            }
+            
+            # 保存原始input_type
+            original_input_type = self.config['input_type']
+            
+            # 对每个noise level进行测试
+            for noise_level in noise_levels:
+                logger.info(f"测试noise level: {noise_level}")
+                
+                # 更新配置和数据集中的noise概率
+                self.config['input_type'] = noise_level
+                noise_prob = dataset.parse_input_type(noise_level)
+                
+                # 更新数据集中的noise_prob
+                self.test_loader.dataset.update_noise_prob(noise_prob)
+                
+                # 运行测试
+                test_evaluator = self.runner_class(
+                    self.model, 
+                    self.test_loader, 
+                    self.device, 
+                    self.loss_module,
+                    exp_config=self.config
+                )
+                
+                dfs_results = test_evaluator.evaluate(keep_all=True, return_dfs=True)
+                
+                # 保存此noise level的分类结果
+                noise_output_dir = os.path.join(self.config['output_dir'], f"noise_level_{noise_level}")
+                os.makedirs(noise_output_dir, exist_ok=True)
+                utils.save_classification_results_to_excel(dfs_results, noise_output_dir)
+                
+                # 从分类报告DataFrame中提取指标
+                if 'classification_report_df' in dfs_results:
+                    # 获取最后一行(avg / total)的指标
+                    metrics_row = dfs_results['classification_report_df'].iloc[-1]
+                    
+                    # 将结果添加到汇总表
+                    all_results['noise_level'].append(noise_level)
+                    all_results['accuracy'].append(metrics_row.get('accuracy', float('nan')))
+                    all_results['precision'].append(metrics_row.get('precision', float('nan')))
+                    all_results['recall'].append(metrics_row.get('recall', float('nan')))
+                    all_results['f1_score'].append(metrics_row.get('f1-score', float('nan')))
+                    
+                    # 为记录创建基于metrics_row的字典
+                    metrics_dict = {
+                        'accuracy': metrics_row.get('accuracy', float('nan')),
+                        'precision': metrics_row.get('precision', float('nan')),
+                        'recall': metrics_row.get('recall', float('nan')),
+                        'f1_score': metrics_row.get('f1-score', float('nan'))
+                    }
+                    
+                    # 将此noise level的结果保存到records文件
+                    utils.register_record(
+                        self.config,
+                        self.config['records_file'],
+                        self.config['initial_timestamp'],
+                        f"{self.config['experiment_name']}_{noise_level}",
+                        metrics_dict,
+                        metrics_dict
+                    )
+                else:
+                    logger.warning(f"在noise level {noise_level}的结果中未找到classification_report_df")
+            
+            # 恢复原始input_type
+            self.config['input_type'] = original_input_type
+            
+            # 将所有noise level的结果保存到一个Excel文件
+            df = pd.DataFrame(all_results)
+            summary_path = os.path.join(self.config['output_dir'], 'noise_level_sweep_results.xlsx')
+            df.to_excel(summary_path, index=False)
+            logger.info(f"不同noise level的汇总结果已保存到: {summary_path}")
+            
+        else:
+            # 原始单一noise level测试逻辑
+            test_evaluator = self.runner_class(
+                self.model, 
+                self.test_loader, 
+                self.device, 
+                self.loss_module,
+                exp_config=self.config
+            )
+            dfs_results = test_evaluator.evaluate(keep_all=True, return_dfs=True)
+            # 保存分类结果到Excel
+            utils.save_classification_results_to_excel(dfs_results, self.config['output_dir'])
         
     def train_dl_model(self):
         """训练深度学习模型"""
@@ -335,6 +487,7 @@ class TrainingPipeline:
         best_metrics = {}
         
         # 在训练前先评估验证集
+        aggr_metrics_val = None
         metrics_names = None
         if self.config['val_ratio'] > 0:
             aggr_metrics_val, best_metrics, best_value = validate(
@@ -418,12 +571,21 @@ class TrainingPipeline:
                     logger.warning('early stopping reached')
             
             # 保存模型
-            utils.save_model(
-                os.path.join(self.config['save_dir'], 'model_{}.pth'.format(mark)), 
-                epoch, 
-                self.model, 
-                self.optimizer
-            )
+            from tmi.models.models import DualTSTransformerEncoderClassifier
+            if isinstance(self.model, DualTSTransformerEncoderClassifier):
+                utils.save_dual_branch_model(
+                    os.path.join(self.config['save_dir'], 'model_{}.pth'.format(mark)), 
+                    epoch, 
+                    self.model, 
+                    self.optimizer
+                )
+            else:
+                utils.save_model(
+                    os.path.join(self.config['save_dir'], 'model_{}.pth'.format(mark)), 
+                    epoch, 
+                    self.model, 
+                    self.optimizer
+                )
             
             if early_stop:
                 logger.warning('stopping training...')
@@ -438,12 +600,21 @@ class TrainingPipeline:
         """调整学习率"""
         if epoch == self.config['lr_step'][self.lr_step]:
             # 在学习率改变时保存模型
-            utils.save_model(
-                os.path.join(self.config['save_dir'], 'model_{}.pth'.format(epoch)), 
-                epoch, 
-                self.model,
-                self.optimizer
-            )
+            from tmi.models.models import DualTSTransformerEncoderClassifier
+            if isinstance(self.model, DualTSTransformerEncoderClassifier):
+                utils.save_dual_branch_model(
+                    os.path.join(self.config['save_dir'], 'model_{}.pth'.format(epoch)), 
+                    epoch, 
+                    self.model,
+                    self.optimizer
+                )
+            else:
+                utils.save_model(
+                    os.path.join(self.config['save_dir'], 'model_{}.pth'.format(epoch)), 
+                    epoch, 
+                    self.model,
+                    self.optimizer
+                )
             
             # 更新学习率
             self.lr = self.lr * self.config['lr_factor'][self.lr_step]
@@ -459,10 +630,15 @@ class TrainingPipeline:
     def export_dl_train_history(self, metrics, metrics_names, best_metrics,
                                  best_value, aggr_metrics_val):
         """导出训练结果"""
+
+        if "pretrain" in config['task']:
+            return 
+        
+        
         # 导出性能指标
         metrics_filepath = os.path.join(
             self.config["output_dir"], 
-            "metrics_history_" + self.config["experiment_name"] + ".xls"
+            "metrics_history_" + self.config["experiment_name"] + ".xlsx"
         )
         book = utils.export_performance_metrics(
             metrics_filepath, 
@@ -583,16 +759,15 @@ class TrainingPipeline:
                 # 仅在测试集上评估机器学习模型
                 test_results = self.evaluate_ml_test()
                 logger.info('机器学习模型测试完成!')
-                return
-            
-            # 训练机器学习模型
-            best_models, best_scores = self.train_ml_model()
-            
-            # # 在测试集上评估
-            # test_results = self.evaluate_ml_test()
-            
-            # 完成
-            logger.info('机器学习分类完成!')
+            else:
+                # 训练机器学习模型
+                best_models, best_scores = self.train_ml_model()
+                
+                # # 在测试集上评估
+                # test_results = self.evaluate_ml_test()
+                
+                # 完成
+                logger.info('机器学习分类完成!')
         else:
             # 深度学习模型流程
             logger.info('执行深度学习模型训练/测试...')
@@ -604,16 +779,15 @@ class TrainingPipeline:
                 # 仅在测试集上评估深度学习模型
                 self.evaluate_dl_test()
                 logger.info('深度学习模型测试完成!')
-                return
-            
-            # 训练深度学习模型
-            metrics, metrics_names, best_metrics, best_value, aggr_metrics_val = self.train_dl_model()
-            
-            # 导出结果
-            self.export_dl_train_history(metrics, metrics_names, best_metrics, best_value, aggr_metrics_val)
-            
-            # 完成
-            logger.info('深度学习模型训练完成!')
+            else:
+                # 训练深度学习模型
+                metrics, metrics_names, best_metrics, best_value, aggr_metrics_val = self.train_dl_model()
+                
+                # 导出结果
+                self.export_dl_train_history(metrics, metrics_names, best_metrics, best_value, aggr_metrics_val)
+                
+                # 完成
+                logger.info('深度学习模型训练完成!')
         
         # 记录总运行时间
         total_runtime = time.time() - self.total_start_time

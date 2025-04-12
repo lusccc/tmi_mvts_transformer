@@ -428,10 +428,17 @@ class Analyzer(object):
 
         return report
 
-    def get_avg_prec_recall(self, ConfMatrix, existing_class_names, excluded_classes=None):
-        """Get average recall and precision, using class frequencies as weights, optionally excluding
-        specified classes"""
-
+    def get_avg_prec_recall(self, ConfMatrix, existing_class_names, excluded_classes=None, average_type='macro'):
+        """Get average recall and precision, optionally excluding specified classes.
+        
+        Args:
+            ConfMatrix: confusion matrix
+            existing_class_names: list of class names
+            excluded_classes: list of classes to exclude from calculation
+            average_type: str, 'macro' or 'weighted'. Default is 'macro'.
+                - 'macro': simple average across classes
+                - 'weighted': weighted average using class frequencies
+        """
         class2ind = dict(zip(existing_class_names, range(len(existing_class_names))))
         included_c = np.full(len(existing_class_names), 1, dtype=bool)
 
@@ -444,13 +451,30 @@ class Analyzer(object):
 
         included = included_c & nonzero_pred
         support = np.sum(ConfMatrix, axis=1)
-        weights = support[included] / np.sum(support[included])
 
+        # 计算每个类的precision
         prec = np.diag(ConfMatrix[included, :][:, included]) / pred_per_class[included]
-        prec_avg = np.dot(weights, prec)
+        
+        # 根据average_type选择平均方式
+        if average_type.lower() == 'weighted':
+            # weighted average
+            weights = support[included] / np.sum(support[included])
+            prec_avg = np.dot(weights, prec)
+        else:  # macro
+            # macro average - 简单平均
+            prec_avg = np.mean(prec)
 
-        # rec = np.diag(ConfMatrix[included_c,:][:,included_c])/support[included_c]
-        rec_avg = np.trace(ConfMatrix[included_c, :][:, included_c]) / np.sum(support[included_c])
+        # 计算每个类的recall
+        rec = np.diag(ConfMatrix[included_c, :][:, included_c]) / support[included_c]
+        
+        # 根据average_type选择平均方式
+        if average_type.lower() == 'weighted':
+            # weighted average
+            weights = support[included_c] / np.sum(support[included_c])
+            rec_avg = np.dot(weights, rec)
+        else:  # macro
+            # macro average - 简单平均
+            rec_avg = np.mean(rec)
 
         return prec_avg, rec_avg
 

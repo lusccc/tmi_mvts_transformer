@@ -1,0 +1,11 @@
+.idea/
+.git/
+all_res/
+bk/
+data/
+experiments/
+run_script_bk/
+test_res/
+train_res*/
+seq128_res/
+seq200_res/

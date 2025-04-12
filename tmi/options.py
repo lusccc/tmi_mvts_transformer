@@ -36,8 +36,6 @@ class Options(object):
                                  help='Print batch info every this many batches')
         self.parser.add_argument('--gpu', type=str, default='0',
                                  help='GPU index, -1 for CPU')
-        self.parser.add_argument('--n_proc', type=int, default=-1,
-                                 help='Number of processes for data loading/preprocessing. By default, equals num. of available cores.')
         self.parser.add_argument('--num_workers', type=int, default=0,
                                  help='dataloader threads. 0 for single-thread.')
         self.parser.add_argument('--seed',
@@ -47,7 +45,7 @@ class Options(object):
                                  help="Limit  dataset to specified smaller random sample, e.g. for rapid debugging purposes. "
                                       "If in [0,1], it will be interpreted as a proportion of the dataset, "
                                       "otherwise as an integer absolute number of samples")
-        self.parser.add_argument('--test_only', choices={'testset', 'fold_transduction'},
+        self.parser.add_argument('--test_only', choices={'testset'},
                                  help='If set, no training will take place; instead, trained model will be loaded and evaluated on test set')
         self.parser.add_argument('--data_name', type=str, help='dataset name')
         self.parser.add_argument('--data_class', type=str,
@@ -135,9 +133,10 @@ class Options(object):
         '''
         self.parser.add_argument('--motion_features', type=str, default='3,4,5,8')
         self.parser.add_argument('--patience', type=int, default=60)
-        self.parser.add_argument('--emb_size', type=int, default=64)
         self.parser.add_argument('--class_names', type=str, default="Walk,Bike,Bus,Car,Train",
                                   help='逗号分隔的类别名称列表，按索引顺序对应标签值')
+        self.parser.add_argument('--noise_level_sweep', action='store_true',
+                                 help='在测试模式下遍历多个噪声级别(0%-100%)进行评估，并汇总结果')
 
     def parse(self):
 

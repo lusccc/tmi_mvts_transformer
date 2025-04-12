@@ -7,6 +7,7 @@ from torch.nn import functional as F
 from torch.nn.modules import MultiheadAttention, Linear, Dropout, BatchNorm1d, TransformerEncoderLayer
 
 from tmi.utils import utils
+from logzero import logger
 
 
 # from ..utils import utils
@@ -29,11 +30,23 @@ def model_factory(config, data):
         return model
 
     if task in ['dual_branch_classification', 'dual_branch_classification_from_scratch']:
-        return DualTSTransformerEncoderClassifier(utils.load_model_hyperparams(config['trajectory_branch_hyperparams']),
-                                                  utils.load_model_hyperparams(config['feature_branch_hyperparams']),
-                                                  len(data.feature_data.class_names), dropout=config['dropout'],
-                                                  activation=config['activation'], emb1_size=config['emb_size'],
-                                                  emb2_size=config['emb_size'])
+        # 使用专门为双分支设计的参数加载方式
+        trajectory_hyperparams = utils.load_model_hyperparams(config['trajectory_branch_hyperparams'])
+        feature_hyperparams = utils.load_model_hyperparams(config['feature_branch_hyperparams'])
+        
+        # 创建双分支模型
+        model = DualTSTransformerEncoderClassifier(
+            trajectory_hyperparams,
+            feature_hyperparams,
+            len(data.feature_data.class_names), 
+            dropout=config['dropout'],
+            activation=config['activation']
+        )
+        
+        # 记录日志
+        logger.info(f"已创建双分支分类模型，使用TSTransformerEncoderForDualBranch作为分支编码器")
+        
+        return model
     if task == 'trajectory_branch_classification':
         return TSTransformerEncoderClassifier(**utils.load_model_hyperparams(config['trajectory_branch_hyperparams']),
                                               num_classes=len(data.class_names))
@@ -41,15 +54,21 @@ def model_factory(config, data):
         return TSTransformerEncoderClassifier(**utils.load_model_hyperparams(config['feature_branch_hyperparams']),
                                               num_classes=len(data.class_names))
     if task in ['feature_branch_classification_from_scratch', 'trajectory_branch_classification_from_scratch']:
-        feat_dim = data.noise_feature_df.shape[1]
-        max_seq_len = data.max_seq_len
-        return TSTransformerEncoderClassifier(feat_dim, max_seq_len, config['d_model'], config['num_heads'],
-                                              config['num_layers'], config['dim_feedforward'],
-                                              num_classes=len(data.class_names), dropout=config['dropout'],
-                                              pos_encoding=config['pos_encoding'], activation=config['activation'],
-                                              norm=config['normalization_layer'], freeze=config['freeze'])
+        if config['test_only']:
+            return TSTransformerEncoderClassifier(**utils.load_model_hyperparams(config['feature_branch_hyperparams']))
+        else:
+            feat_dim = data.noise_feature_df.shape[1]
+            max_seq_len = data.max_seq_len
+            model = TSTransformerEncoderClassifier(feat_dim, max_seq_len, config['d_model'], config['num_heads'],
+                                                config['num_layers'], config['dim_feedforward'],
+                                                num_classes=len(data.class_names), dropout=config['dropout'],
+                                                pos_encoding=config['pos_encoding'], activation=config['activation'],
+                                                norm=config['normalization_layer'], freeze=config['freeze'])
+            utils.save_model_hyperparams(config, model.hyperparams)                                     
+            return model
     if 'cnn_classification' in task:
-        return CNN1DClassifier_128()
+        # return CNN1DClassifier_128()
+        return CNN1DClassifier_200()
     if 'lstm_classification' in task:
         return MSRLSTMClassifier()
 
@@ -264,6 +283,8 @@ class TSTransformerEncoderClassifier(nn.Module):
                  dropout=0.1, pos_encoding='fixed', activation='gelu', norm='BatchNorm', freeze=False):
         super(TSTransformerEncoderClassifier, self).__init__()
 
+        self.hyperparams = locals()
+        
         self.max_len = max_len
         self.d_model = d_model
         self.n_heads = n_heads
@@ -289,10 +310,66 @@ class TSTransformerEncoderClassifier(nn.Module):
         self.output_layer = self.build_output_module(d_model, max_len, num_classes)
 
     def build_output_module(self, d_model, max_len, num_classes):
-        output_layer = nn.Linear(d_model * max_len, num_classes)
-        # no softmax (or log softmax), because CrossEntropyLoss does this internally. If probabilities are needed,
-        # add F.log_softmax and use NLLoss
-        return output_layer
+        # 使用更高效的特征提取方式而不是简单展平
+        # 利用全局平均池化和全局最大池化捕获序列中的关键信息
+        # 这大大减少了参数量，同时保留了时间序列中的关键特征
+        
+        class TemporalFeatureExtractor(nn.Module):
+            def __init__(self, d_model, max_len, num_classes):
+                super(TemporalFeatureExtractor, self).__init__()
+                # 输入: (batch_size, seq_length * d_model) 来自展平的序列
+                # 也可以接收 (batch_size, seq_length, d_model) 的输入并处理
+                
+                self.d_model = d_model
+                self.max_len = max_len
+                
+                # 特征提取层
+                self.feature_extractor = nn.Sequential(
+                    # 关注时间维度的卷积，保留全部特征维度
+                    nn.Conv1d(d_model, d_model, kernel_size=3, padding=1),
+                    nn.BatchNorm1d(d_model),
+                    nn.GELU(),
+                    nn.Conv1d(d_model, d_model, kernel_size=3, padding=1),
+                    nn.BatchNorm1d(d_model),
+                    nn.GELU(),
+                )
+                
+                # 多尺度聚合模块
+                hidden_size = d_model * 2  # 平均池化和最大池化的拼接
+                
+                # 分类头
+                self.classifier = nn.Sequential(
+                    nn.Linear(hidden_size, hidden_size // 2),
+                    nn.BatchNorm1d(hidden_size // 2),
+                    nn.GELU(),
+                    nn.Dropout(0.2),
+                    nn.Linear(hidden_size // 2, num_classes)
+                )
+            
+            def forward(self, x):
+                # 输入可能是展平的 (batch_size, seq_length * d_model)
+                if x.dim() == 2:
+                    batch_size = x.size(0)
+                    x = x.view(batch_size, self.max_len, self.d_model)
+                
+                # 转置为卷积1D格式 (batch_size, d_model, seq_length)
+                x = x.transpose(1, 2)
+                
+                # 应用特征提取
+                x = self.feature_extractor(x)
+                
+                # 全局池化: 两种聚合方式捕获不同类型的特征
+                avg_pool = torch.mean(x, dim=2)  # 全局平均池化
+                max_pool, _ = torch.max(x, dim=2)  # 全局最大池化
+                
+                # 拼接不同的池化结果
+                x = torch.cat([avg_pool, max_pool], dim=1)
+                
+                # 分类
+                x = self.classifier(x)
+                return x
+        
+        return TemporalFeatureExtractor(d_model, max_len, num_classes)
 
     def forward(self, X, padding_masks):
         """
@@ -322,42 +399,149 @@ class TSTransformerEncoderClassifier(nn.Module):
         return output
 
 
+# 新增一个专用于双分支模型的TSTransformerEncoder子类
+class TSTransformerEncoderForDualBranch(TSTransformerEncoder):
+    """为双分支模型特别优化的TSTransformerEncoder版本
+    
+    与标准TSTransformerEncoder的主要区别:
+    1. 输出层被替换为Flatten
+    2. 优化了内部结构以支持DualTSTransformerEncoderClassifier
+    """
+    
+    def __init__(self, feat_dim, max_len, d_model, n_heads, num_layers, dim_feedforward, dropout=0.1,
+                 pos_encoding='fixed', activation='gelu', norm='BatchNorm', freeze=False):
+        super(TSTransformerEncoderForDualBranch, self).__init__(
+            feat_dim, max_len, d_model, n_heads, num_layers, dim_feedforward, 
+            dropout, pos_encoding, activation, norm, freeze
+        )
+        # 替换输出层为Flatten而不是线性层
+        self.output_layer = nn.Flatten()
+        
+    def forward(self, X, padding_masks):
+        """
+        Args:
+            X: (batch_size, seq_length, feat_dim) torch tensor of masked features (input)
+            padding_masks: (batch_size, seq_length) boolean tensor, 1 means keep vector at this position, 0 means padding
+        Returns:
+            output: (batch_size, seq_length * d_model) 扁平化的特征向量
+        """
+        # 重用父类的Transformer编码器逻辑
+        inp = X.permute(1, 0, 2)
+        inp = self.project_inp(inp) * math.sqrt(self.d_model)
+        inp = self.pos_enc(inp)
+        output = self.transformer_encoder(inp, src_key_padding_mask=~padding_masks)
+        output = self.act(output)
+        output = output.permute(1, 0, 2)
+        output = self.dropout1(output)
+        
+        # 应用掩码并扁平化
+        output = output * padding_masks.unsqueeze(-1)  # 对填充位置置零
+        output = self.output_layer(output)  # 扁平化
+        
+        return output
+
+
 class DualTSTransformerEncoderClassifier(nn.Module):
     def __init__(self, trajectory_branch_hyperparams, feature_branch_hyperparams, num_classes, dropout=0.1,
-                 activation='gelu', emb1_size=64, emb2_size=64):
+                 activation='gelu'):
         super(DualTSTransformerEncoderClassifier, self).__init__()
         self.num_classes = num_classes
-        self.trajectory_branch = TSTransformerEncoder(**trajectory_branch_hyperparams)
-        self.feature_branch = TSTransformerEncoder(**feature_branch_hyperparams)
+        
+        # 记录原始特征维度和序列长度，用于后续处理
+        self.trajectory_feat_dim = trajectory_branch_hyperparams.get('feat_dim')
+        self.feature_feat_dim = feature_branch_hyperparams.get('feat_dim')
+        self.trajectory_max_len = trajectory_branch_hyperparams.get('max_len')
+        self.feature_max_len = feature_branch_hyperparams.get('max_len')
+        
+        # 创建分支模型，使用专门为双分支设计的TSTransformerEncoder
+        self.trajectory_branch = TSTransformerEncoderForDualBranch(**trajectory_branch_hyperparams)
+        self.feature_branch = TSTransformerEncoderForDualBranch(**feature_branch_hyperparams)
 
-        # replace output layer in original model
-        self.trajectory_branch.output_layer = nn.Flatten()  # i.e., reshape()
-        self.feature_branch.output_layer = nn.Flatten()
-        # then, create new output layer
-        self.encoder1_output_layer = nn.Linear(self.trajectory_branch.d_model * self.trajectory_branch.max_len,
-                                               emb1_size)
-        self.encoder2_output_layer = nn.Linear(self.feature_branch.d_model * self.feature_branch.max_len, emb2_size)
+        # 保存d_model，用于维度调整
+        self.trajectory_d_model = self.trajectory_branch.d_model
+        self.feature_d_model = self.feature_branch.d_model
+        
+        # 轨迹分支特征提取器 - 与单分支保持一致
+        self.encoder1_output_layer = self.build_feature_extractor(self.trajectory_d_model)
+        
+        # 特征分支特征提取器 - 与单分支保持一致
+        self.encoder2_output_layer = self.build_feature_extractor(self.feature_d_model)
 
-        # create output layer for this DualTSTransformerEncoderClassifier
-        # self.output_layer = nn.Linear(emb1_size + emb2_size, num_classes)
-
-        # the emb from each branch will be added together, so here make output emb size same as each branch
-        self.output_layer = nn.Linear(emb1_size, num_classes)
+        # 分类头 - 注意输入维度的变化
+        combined_feat_size = (self.trajectory_d_model * 2) + (self.feature_d_model * 2)  # 两个分支的拼接特征
+        self.output_layer = nn.Sequential(
+            nn.Linear(combined_feat_size, combined_feat_size // 2),
+            nn.BatchNorm1d(combined_feat_size // 2),
+            nn.GELU(),
+            nn.Dropout(0.25),
+            nn.Linear(combined_feat_size // 2, num_classes)
+        )
 
         self.act = _get_activation_fn(activation)
         self.dropout1 = nn.Dropout(dropout)
 
+    def build_feature_extractor(self, d_model):
+        """构建与单分支一致的特征提取器"""
+        return nn.Sequential(
+            # 特征提取层 - 保持特征维度不变
+            nn.Conv1d(d_model, d_model, kernel_size=3, padding=1),
+            nn.BatchNorm1d(d_model),
+            nn.GELU(),
+            nn.Conv1d(d_model, d_model, kernel_size=3, padding=1),
+            nn.BatchNorm1d(d_model),
+            nn.GELU()
+            # 注意这里不包含池化操作，池化在forward中进行以便获取两种池化结果
+        )
+        
     def forward(self, X1, padding_mask1, X2, padding_mask2):
-        output1 = self.trajectory_branch(X1, padding_mask1)
-        output1 = self.encoder1_output_layer(output1)  # (batch_size, emb1_size)
-        output2 = self.feature_branch(X2, padding_mask2)
-        output2 = self.encoder2_output_layer(output2)  # (batch_size, emb2_size)
-        # output = torch.cat([output1, output2], dim=1)  # (batch_size, emb1_size+emb2_size
-        output = torch.add(output1, output2)  # (batch_size, emb1_size+emb2_size
-        # """add gelu:"""
-        # output = self.act(output)
-
+        """双分支转换器分类器的前向传播
+        
+        Args:
+            X1: 轨迹分支输入，形状 (batch_size, seq_length, feat_dim)
+            padding_mask1: 轨迹分支填充掩码，形状 (batch_size, seq_length)
+            X2: 特征分支输入，形状 (batch_size, seq_length, feat_dim)
+            padding_mask2: 特征分支填充掩码，形状 (batch_size, seq_length)
+            
+        Returns:
+            output: 分类结果，形状 (batch_size, num_classes)
+        """
+        # 轨迹分支 - 获取扁平化特征
+        output1 = self.trajectory_branch(X1, padding_mask1)  # (batch_size, seq_length * d_model)
+        
+        # 调整维度为卷积1D格式
+        batch_size = output1.size(0)
+        output1 = output1.view(batch_size, self.trajectory_max_len, self.trajectory_d_model)
+        output1 = output1.transpose(1, 2)  # (batch_size, d_model, seq_length)
+        
+        # 应用特征提取
+        output1 = self.encoder1_output_layer(output1)
+        
+        # 应用双池化策略 - 与单分支一致
+        avg_pool1 = torch.mean(output1, dim=2)  # 全局平均池化
+        max_pool1, _ = torch.max(output1, dim=2)  # 全局最大池化
+        output1 = torch.cat([avg_pool1, max_pool1], dim=1)  # (batch_size, d_model*2)
+        
+        # 特征分支 - 获取扁平化特征
+        output2 = self.feature_branch(X2, padding_mask2)  # (batch_size, seq_length * d_model)
+        
+        # 调整维度为卷积1D格式
+        output2 = output2.view(batch_size, self.feature_max_len, self.feature_d_model)
+        output2 = output2.transpose(1, 2)  # (batch_size, d_model, seq_length)
+        
+        # 应用特征提取
+        output2 = self.encoder2_output_layer(output2)
+        
+        # 应用双池化策略 - 与单分支一致
+        avg_pool2 = torch.mean(output2, dim=2)  # 全局平均池化
+        max_pool2, _ = torch.max(output2, dim=2)  # 全局最大池化
+        output2 = torch.cat([avg_pool2, max_pool2], dim=1)  # (batch_size, d_model*2)
+        
+        # 融合两个分支的特征
+        output = torch.cat([output1, output2], dim=1)  # (batch_size, d_model1*2 + d_model2*2)
+        
+        # 分类
         output = self.output_layer(output)
+        
         return output
 
 

@@ -188,12 +188,35 @@ def parse_input_type(input_type):
 class GenericClassificationDataset(Dataset):
     def __init__(self, data, indices):
         super(GenericClassificationDataset, self).__init__()
+        
+        t_start = time.time()
 
         self.data = data  # this is a subclass of the BaseData class in data.py
         self.IDs = indices  # list of data IDs, but also mapping between integer index and ID
+        
+        # 预先加载所有数据到字典中，避免在__getitem__中使用.loc
+        self.noise_features = {}
+        self.clean_features = {}
+        self.labels = {}
+        
+        for ID in self.IDs:
+            self.noise_features[ID] = data.noise_feature_df.loc[ID].values.copy()
+            self.clean_features[ID] = data.clean_feature_df.loc[ID].values.copy()
+            self.labels[ID] = data.labels_df.loc[ID].values.copy()
+        
+        # 保留原始DataFrame引用以保持兼容性
         self.noise_feature_df = self.data.noise_feature_df.loc[self.IDs]
         self.clean_feature_df = self.data.clean_feature_df.loc[self.IDs]
         self.labels_df = self.data.labels_df.loc[self.IDs]
+        
+        # 预计算常用值
+        self.noise_prob = parse_input_type(config['input_type'])
+        
+        logger.info('GenericClassificationDataset __init__ time: %s Seconds' % (time.time() - t_start))
+
+    def update_noise_prob(self, new_prob):
+        """更新数据集的噪声概率，用于noise level sweep测试"""
+        self.noise_prob = new_prob
 
     def __getitem__(self, ind):
         """
@@ -206,13 +229,15 @@ class GenericClassificationDataset(Dataset):
             ID: ID of sample
         """
         ind = int(ind / 2)
-        X_noise = self.noise_feature_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim) array
-        X_clean = self.clean_feature_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim) array
-        y = self.labels_df.loc[self.IDs[ind]].values  # (num_labels,) array
+        ID = self.IDs[ind]
+        
+        # 直接从缓存字典获取数据
+        X_noise = self.noise_features[ID]
+        X_clean = self.clean_features[ID]
+        y = self.labels[ID]
 
         # 使用概率来决定是否使用noise数据
-        noise_prob = parse_input_type(config['input_type'])
-        noise_input = random.random() < noise_prob
+        noise_input = random.random() < self.noise_prob
 
         if noise_input:
             input = X_noise
@@ -220,7 +245,7 @@ class GenericClassificationDataset(Dataset):
             input = X_clean
         target = y
 
-        return torch.from_numpy(input), torch.from_numpy(target), self.IDs[ind]
+        return torch.from_numpy(input), torch.from_numpy(target), ID
 
     def __len__(self):
         return len(self.IDs) * 2
@@ -234,22 +259,41 @@ class DenoisingDataset(Dataset):
 
         self.data = data  # this is a subclass of the BaseData class in data.py
         self.IDs = indices  # list of data IDs, but also mapping between integer index and ID
+        
+        # 预先加载所有数据到字典中
+        self.noise_features = {}
+        self.clean_features = {}
+        
+        for ID in self.IDs:
+            self.noise_features[ID] = data.noise_feature_df.loc[ID].values.copy()
+            self.clean_features[ID] = data.clean_feature_df.loc[ID].values.copy()
+        
+        # 保留原始DataFrame引用以保持兼容性
         self.noise_feature_df = self.data.noise_feature_df.loc[self.IDs]
         self.clean_feature_df = self.data.clean_feature_df.loc[self.IDs]
         self.labels_df = self.data.labels_df.loc[self.IDs]
+        
+        # 预计算常用值
+        self.noise_prob = parse_input_type(config['input_type'])
 
         logger.info('DenoisingDataset __init__ time: %s Seconds' % (time.time() - t_start))
 
         self.exclude_feats = exclude_feats
 
+    def update_noise_prob(self, new_prob):
+        """更新数据集的噪声概率，用于noise level sweep测试"""
+        self.noise_prob = new_prob
+
     def __getitem__(self, ind):
         ind = int(ind / 2)
-        X_noise = self.noise_feature_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim) array
-        X_clean = self.clean_feature_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim) array
+        ID = self.IDs[ind]
+        
+        # 直接从缓存字典获取数据
+        X_noise = self.noise_features[ID]
+        X_clean = self.clean_features[ID]
 
         # 使用概率来决定是否使用noise数据
-        noise_prob = parse_input_type(config['input_type'])
-        noise_input = random.random() < noise_prob
+        noise_input = random.random() < self.noise_prob
 
         if noise_input:
             input = X_noise
@@ -257,7 +301,7 @@ class DenoisingDataset(Dataset):
             input = X_clean
         target = X_clean
 
-        return torch.from_numpy(input), torch.from_numpy(target), self.IDs[ind]
+        return torch.from_numpy(input), torch.from_numpy(target), ID
 
     def __len__(self):
         return len(self.IDs) * 2
@@ -275,27 +319,49 @@ class DenoisingImputationDataset(Dataset):
 
         self.data = data  # this is a subclass of the BaseData class in data.py
         self.IDs = indices  # list of data IDs, but also mapping between integer index and ID
+        
+        # 预先加载所有数据到字典中
+        self.noise_features = {}
+        self.clean_features = {}
+        self.masks = {}
+        
+        for ID in self.IDs:
+            self.noise_features[ID] = data.noise_feature_df.loc[ID].values.copy()
+            self.clean_features[ID] = data.clean_feature_df.loc[ID].values.copy()
+            self.masks[ID] = data.masks_df.loc[ID].values.copy()
+        
+        # 保留原始DataFrame引用以保持兼容性
         self.noise_feature_df = self.data.noise_feature_df.loc[self.IDs]
         self.clean_feature_df = self.data.clean_feature_df.loc[self.IDs]
         self.noise_mask_df = self.data.masks_df.loc[self.IDs]
         self.labels_df = self.data.labels_df.loc[self.IDs]
+        
+        # 预计算常用值
+        self.noise_prob = parse_input_type(config['input_type'])
+        self.disable_mask = config.get('disable_mask', False)
 
         logger.info('DenoisingImputationDataset __init__ time: %s Seconds' % (time.time() - t_start))
 
         self.exclude_feats = exclude_feats
 
+    def update_noise_prob(self, new_prob):
+        """更新数据集的噪声概率，用于noise level sweep测试"""
+        self.noise_prob = new_prob
+
     def __getitem__(self, ind):
         ind = int(ind / 2)
-        X_noise = self.noise_feature_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim) array
-        X_clean = self.clean_feature_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim) array
-        mask = self.noise_mask_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim)
+        ID = self.IDs[ind]
+        
+        # 直接从缓存字典获取数据
+        X_noise = self.noise_features[ID]
+        X_clean = self.clean_features[ID]
+        mask = self.masks[ID].copy()  # 复制一份，防止修改原始数据
 
-        if config['disable_mask']:
+        if self.disable_mask:
             mask[:] = 0
 
         # 使用概率来决定是否使用noise数据
-        noise_prob = parse_input_type(config['input_type'])
-        noise_input = random.random() < noise_prob
+        noise_input = random.random() < self.noise_prob
 
         if noise_input:
             input = X_noise
@@ -303,7 +369,7 @@ class DenoisingImputationDataset(Dataset):
             input = X_clean
         target = X_clean
 
-        return torch.from_numpy(input), torch.from_numpy(target), torch.from_numpy(mask), self.IDs[ind]
+        return torch.from_numpy(input), torch.from_numpy(target), torch.from_numpy(mask), ID
 
     def __len__(self):
         return len(self.IDs) * 2
@@ -319,24 +385,45 @@ class ImputationDataset(Dataset):
 
         self.data = data  # this is a subclass of the BaseData class in data.py
         self.IDs = indices  # list of data IDs, but also mapping between integer index and ID
+        
+        # 预先加载所有数据到字典中
+        self.noise_features = {}
+        self.clean_features = {}
+        self.masks = {}
+        
+        for ID in self.IDs:
+            self.noise_features[ID] = data.noise_feature_df.loc[ID].values.copy()
+            self.clean_features[ID] = data.clean_feature_df.loc[ID].values.copy()
+            self.masks[ID] = data.masks_df.loc[ID].values.copy()
+        
+        # 保留原始DataFrame引用以保持兼容性
         self.noise_feature_df = self.data.noise_feature_df.loc[self.IDs]
         self.clean_feature_df = self.data.clean_feature_df.loc[self.IDs]
         self.noise_mask_df = self.data.masks_df.loc[self.IDs]
         self.labels_df = self.data.labels_df.loc[self.IDs]
+        
+        # 预计算常用值
+        self.noise_prob = parse_input_type(config['input_type'])
 
         logger.info('ImputationDataset __init__ time: %s Seconds' % (time.time() - t_start))
 
         self.exclude_feats = exclude_feats
 
+    def update_noise_prob(self, new_prob):
+        """更新数据集的噪声概率，用于noise level sweep测试"""
+        self.noise_prob = new_prob
+
     def __getitem__(self, ind):
         ind = int(ind / 2)
-        X_noise = self.noise_feature_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim) array
-        X_clean = self.clean_feature_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim) array
-        mask = self.noise_mask_df.loc[self.IDs[ind]].values  # (seq_length, feat_dim)
+        ID = self.IDs[ind]
+        
+        # 直接从缓存字典获取数据
+        X_noise = self.noise_features[ID]
+        X_clean = self.clean_features[ID]
+        mask = self.masks[ID]
 
         # 使用概率来决定是否使用noise数据
-        noise_prob = parse_input_type(config['input_type'])
-        noise_input = random.random() < noise_prob
+        noise_input = random.random() < self.noise_prob
 
         if noise_input:
             input = X_noise
@@ -344,7 +431,7 @@ class ImputationDataset(Dataset):
             input = X_clean
         target = X_clean
 
-        return torch.from_numpy(input), torch.from_numpy(target), torch.from_numpy(mask), self.IDs[ind]
+        return torch.from_numpy(input), torch.from_numpy(target), torch.from_numpy(mask), ID
 
     def update(self):
         print('!!!update')
@@ -356,26 +443,59 @@ class ImputationDataset(Dataset):
 class DualBranchClassificationDataset(Dataset):
     def __init__(self, data, indices, exclude_feats=None):
         super(DualBranchClassificationDataset, self).__init__()
-        self.imputation_dataset = ImputationDataset(data.trajectory_data, indices, exclude_feats)
-        self.denoising_dataset = DenoisingDataset(data.feature_data, indices, exclude_feats)
+        
+        t_start = time.time()
+        
         self.IDs = indices
+        
+        # 预先加载所有数据到字典中
+        self.trajectory_noise_features = {}
+        self.trajectory_clean_features = {}
+        self.feature_noise_features = {}
+        self.feature_clean_features = {}
+        self.labels = {}
+        
+        for ID in self.IDs:
+            # 轨迹数据
+            self.trajectory_noise_features[ID] = data.trajectory_data.noise_feature_df.loc[ID].values.copy()
+            self.trajectory_clean_features[ID] = data.trajectory_data.clean_feature_df.loc[ID].values.copy()
+            
+            # 特征数据
+            self.feature_noise_features[ID] = data.feature_data.noise_feature_df.loc[ID].values.copy()
+            self.feature_clean_features[ID] = data.feature_data.clean_feature_df.loc[ID].values.copy()
+            
+            # 标签数据
+            self.labels[ID] = data.feature_data.labels_df.loc[ID].values.copy()
+        
+        # 保留原始引用以保持兼容性
         self.labels_df = data.feature_data.labels_df.loc[self.IDs]
+        
+        # 预计算常用值
+        self.noise_prob = parse_input_type(config['input_type'])
+        
+        logger.info('DualBranchClassificationDataset __init__ time: %s Seconds' % (time.time() - t_start))
+
+    def update_noise_prob(self, new_prob):
+        """更新数据集的噪声概率，用于noise level sweep测试"""
+        self.noise_prob = new_prob
 
     def __getitem__(self, ind):
         ind = int(ind / 2)
-
+        ID = self.IDs[ind]
+        
         # 使用概率来决定是否使用noise数据
-        noise_prob = parse_input_type(config['input_type'])
-        noise_input = random.random() < noise_prob
+        noise_input = random.random() < self.noise_prob
 
         if noise_input:
-            X1 = self.imputation_dataset.noise_feature_df.loc[self.IDs[ind]].values
-            X2 = self.denoising_dataset.noise_feature_df.loc[self.IDs[ind]].values
+            X1 = self.trajectory_noise_features[ID]
+            X2 = self.feature_noise_features[ID]
         else:
-            X1 = self.imputation_dataset.clean_feature_df.loc[self.IDs[ind]].values
-            X2 = self.denoising_dataset.clean_feature_df.loc[self.IDs[ind]].values
-        y = self.labels_df.loc[self.IDs[ind]].values  # (num_labels,) array
-        return torch.from_numpy(X1), torch.from_numpy(X2), torch.from_numpy(y), torch.as_tensor(self.IDs[ind])
+            X1 = self.trajectory_clean_features[ID]
+            X2 = self.feature_clean_features[ID]
+            
+        y = self.labels[ID]
+        
+        return torch.from_numpy(X1), torch.from_numpy(X2), torch.from_numpy(y), torch.as_tensor(ID)
 
     def __len__(self):
         return len(self.IDs) * 2

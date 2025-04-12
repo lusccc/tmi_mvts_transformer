@@ -5,7 +5,7 @@ import logzero
 from logzero import logger
 import numpy as np
 import pandas as pd
-
+from multiprocessing import Pool, cpu_count
 
 class Normalizer(object):
     """
@@ -77,10 +77,19 @@ def subsample(y, limit=256, factor=2):
     return y
 
 
-class FeatureData(object):
-    def __init__(self, limit_size=None, config=None, data_split=None):
 
-        # self.set_num_processes(n_proc=n_proc)
+
+# 添加并行读取工具函数
+def parallel_read_pickle(paths):
+    """并行读取多个pickle文件(使用多进程)"""
+    with Pool(processes=min(4, cpu_count(), len(paths))) as pool:
+        return pool.map(pd.read_pickle, paths)
+
+
+
+class FeatureData(object):
+
+    def __init__(self, limit_size=None, config=None, data_split=None):
 
         self.config = config
         self.data_name = config['data_name']
@@ -125,11 +134,10 @@ class FeatureData(object):
                 os.path.exists(labels_df_path) and \
                 os.path.exists(masks_df_path):
             logger.info(f'read dataframe from file: {noise_df_path}, {clean_df_path}')
-            noise_df = pd.read_pickle(noise_df_path)
-            clean_df = pd.read_pickle(clean_df_path)
-            masks_df = pd.read_pickle(masks_df_path)
-            labels_df = pd.read_pickle(labels_df_path)
-
+            # 使用并行读取
+            noise_df, clean_df, masks_df, labels_df = parallel_read_pickle(
+                [noise_df_path, clean_df_path, masks_df_path, labels_df_path]
+            )
             lengths = noise_df.groupby(noise_df.index).count()[0].values
             self.max_seq_len = int(np.max(lengths))
         else:
@@ -237,11 +245,10 @@ class TrajectoryData(object):
                 os.path.exists(masks_df_path) and \
                 os.path.exists(labels_df_path):
             logger.info(f'read dataframe from file: {noise_df_path}, {clean_df_path}')
-            noise_df = pd.read_pickle(noise_df_path)
-            clean_df = pd.read_pickle(clean_df_path)
-            masks_df = pd.read_pickle(masks_df_path)
-            labels_df = pd.read_pickle(labels_df_path)
-
+            # 使用并行读取
+            noise_df, clean_df, masks_df, labels_df = parallel_read_pickle(
+                [noise_df_path, clean_df_path, masks_df_path, labels_df_path]
+            )
             lengths = noise_df.groupby(noise_df.index).agg(lambda x: x.nunique())[0].values
             self.max_seq_len = int(np.max(lengths))
         else:

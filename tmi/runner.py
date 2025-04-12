@@ -102,7 +102,7 @@ def setup(args):
 
 
 def evaluate(evaluator):
-    """Perform a single, one-off evaluation on an evaluator object (initialized with a dataset)"""
+    """NOT USED! Perform a single, one-off evaluation on an evaluator object (initialized with a dataset)"""
 
     eval_start_time = time.time()
     with torch.no_grad():
@@ -239,7 +239,7 @@ class UnsupervisedRunner(BaseRunner):
             total_loss.backward()
 
             # torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=1.0)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=4.0)
+            # torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=4.0)
             self.optimizer.step()
 
             metrics = {"loss": mean_loss.item()}
@@ -476,6 +476,8 @@ class SupervisedRunner(BaseRunner):
 
         self.epoch_metrics['accuracy'] = metrics_dict['total_accuracy']  # same as average recall over all classes
         self.epoch_metrics['precision'] = metrics_dict['prec_avg']  # average precision over all classes
+        self.epoch_metrics['recall'] = metrics_dict['rec_avg']  # average recall over all classes
+        self.epoch_metrics['f1'] = np.mean(metrics_dict['f1'])  # average f1 over all classes
 
         if self.model.num_classes == 2:
             false_pos_rate, true_pos_rate, _ = sklearn.metrics.roc_curve(targets, probs[:, 1])  # 1D scores needed

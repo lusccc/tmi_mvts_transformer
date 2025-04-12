@@ -23,7 +23,7 @@ define stay time as 20min
 """
 MAX_STAY_TIME_INTERVAL = 60 * 20
 MIN_N_POINTS = 10
-MAX_N_POINTS = 128
+MAX_N_POINTS = 200  # TODO
 
 """
 5 classification labels
