@@ -18,6 +18,7 @@ class Normalizer(object):
             norm_type: choose from:
                 "standardization", "minmax": normalizes dataframe across ALL contained rows (time steps)
                 "per_sample_std", "per_sample_minmax": normalizes each sample separately (i.e. across only its own rows)
+                "none": does not perform any normalization, returns the input as is
             mean, std, min_val, max_val: optional (num_feat,) Series of pre-computed values
         """
 
@@ -48,12 +49,19 @@ class Normalizer(object):
 
         elif self.norm_type == "per_sample_std":
             grouped = df.groupby(by=df.index)
-            return (df - grouped.transform('mean')) / grouped.transform('std')
+            means = grouped.transform('mean')
+            stds = grouped.transform('std')
+            # 添加小常数防止除零
+            eps = np.finfo(float).eps
+            return (df - means) / (stds + eps)
 
         elif self.norm_type == "per_sample_minmax":
             grouped = df.groupby(by=df.index)
             min_vals = grouped.transform('min')
             return (df - min_vals) / (grouped.transform('max') - min_vals + np.finfo(float).eps)
+            
+        elif self.norm_type == "none":
+            return df
 
         else:
             raise (NameError(f'Normalize method "{self.norm_type}" not implemented'))
@@ -203,6 +211,7 @@ class FeatureData(object):
             labels_df = pd.DataFrame(labels.cat.codes,
                                      dtype=np.int8)  # int8-32 gives an error when using nn.CrossEntropyLoss
 
+        logger.info(f"FeatureData max_seq_len: {self.max_seq_len}")
         return noise_df, clean_df, masks_df, labels_df
 
 
@@ -303,6 +312,7 @@ class TrajectoryData(object):
             labels_df = pd.DataFrame(labels.cat.codes,
                                      dtype=np.int8)  # int8-32 gives an error when using nn.CrossEntropyLoss
 
+        logger.info(f"TrajectoryData max_seq_len: {self.max_seq_len}")
         return noise_df, clean_df, masks_df, labels_df
 
 
@@ -316,6 +326,7 @@ class TrajectoryWithFeatureData(object):
         self.all_IDs = self.feature_data.all_IDs
         self.feature_dfs = self.trajectory_data.feature_dfs + self.feature_data.feature_dfs
         self.labels_df = self.feature_data.labels_df
+        logger.info(f"TrajectoryWithFeatureData - feature max_seq_len: {self.feature_data.max_seq_len}, trajectory max_seq_len: {self.trajectory_data.max_seq_len}")
 
 
 data_factory = {

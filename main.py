@@ -42,6 +42,14 @@ from functools import partial
 import signal
 import sys
 
+# show tensor shape in vscode debugger
+def custom_repr(self):
+    return f"{{Tensor:{tuple(self.shape)}}} {original_repr(self)}"
+
+
+original_repr = torch.Tensor.__repr__
+torch.Tensor.__repr__ = custom_repr
+
 # 处理指标的常量
 NEG_METRICS = {'loss', 'mse', }
 
@@ -179,14 +187,11 @@ class TrainingPipeline:
         if self.config['freeze']:
             for name, param in self.model.named_parameters():
                 # 允许所有output_layer相关的参数都可训练
-                if 'output_layer' in name:
-                    logger.info(f'set layer {name} requires_grad = True')
-                    param.requires_grad = True
-                # 允许所有encoder输出层相关的参数也可训练
-                elif any(x in name for x in ['encoder1_output_layer', 'encoder2_output_layer']):
+                if 'output_to_classification' in name:
                     logger.info(f'set layer {name} requires_grad = True')
                     param.requires_grad = True
                 else:
+                    # 其他参数保持可训练状态
                     param.requires_grad = False
 
         # 输出模型信息
@@ -507,7 +512,8 @@ class TrainingPipeline:
                 metrics_names = ('epoch', 'loss')
         
         # 设置早停
-        monitor_on = 'accuracy' if 'classification' in self.config['task'] else 'loss'
+        # monitor_on = 'accuracy' if 'classification' in self.config['task'] else 'loss'
+        monitor_on = 'combined' if 'classification' in self.config['task'] else 'loss'
         early_stopping = EarlyStopping(
             round(self.config['patience'] / self.config['val_interval']), 
             verbose=True,
@@ -566,9 +572,20 @@ class TrainingPipeline:
                 metrics.append(list(metrics_values))
                 
                 # 检查早停条件
-                if early_stopping(aggr_metrics_val[monitor_on]).early_stop:
-                    early_stop = True
-                    logger.warning('early stopping reached')
+                if 'classification' in self.config['task']:
+                    # 分类任务传入包含多个指标的字典
+                    early_stop_metrics = {
+                        'loss': aggr_metrics_val['loss'],
+                        'accuracy': aggr_metrics_val['accuracy']
+                    }
+                    if early_stopping(early_stop_metrics).early_stop:
+                        early_stop = True
+                        logger.warning('早停条件已达到，模型不再改进')
+                else:
+                    # 回归任务只看损失
+                    if early_stopping(aggr_metrics_val[monitor_on]).early_stop:
+                        early_stop = True
+                        logger.warning('早停条件已达到，模型不再改进')
             
             # 保存模型
             from tmi.models.models import DualTSTransformerEncoderClassifier
@@ -723,21 +740,121 @@ class TrainingPipeline:
         """评估机器学习模型在测试集上的性能"""
         logger.info("准备机器学习测试数据...")
         
-        # 准备测试数据
-        X_test, y_test = self._prepare_ml_data(self.test_loader)
-        
-        # 计算手工特征
-        x_handcrafted_test = self.ml_classifier.calc_handcrafted_features(X_test)
-        
-        # 评估模型
-        logger.info("在测试集上评估机器学习模型...")
-        test_results = self.ml_classifier.evaluate_ml_models(
-            x_handcrafted_test, 
-            y_test
-        )
-        
-        logger.info("机器学习模型评估完成!")
-        return test_results
+        # 检查是否需要遍历多个noise level进行测试
+        if self.config.get('noise_level_sweep', False):
+            # 定义要测试的noise level列表
+            noise_levels = ['0%noise', '10%noise', '20%noise', '30%noise', '40%noise', 
+                           '50%noise', '60%noise', '70%noise', '80%noise', '90%noise', '100%noise']
+            
+            # 创建结果汇总表
+            all_results = {
+                'noise_level': [],
+                'model': [],
+                'accuracy': [],
+                'precision': [],
+                'recall': [],
+                'f1_score': []
+            }
+            
+            # 保存原始input_type
+            original_input_type = self.config['input_type']
+            
+            # 对每个noise level进行测试
+            for noise_level in noise_levels:
+                logger.info(f"测试noise level: {noise_level}")
+                
+                # 更新配置和数据集中的noise概率
+                self.config['input_type'] = noise_level
+                noise_prob = dataset.parse_input_type(noise_level)
+                
+                # 更新数据集中的noise_prob
+                self.test_loader.dataset.update_noise_prob(noise_prob)
+                
+                # 准备测试数据
+                X_test, y_test = self._prepare_ml_data(self.test_loader)
+                
+                # 计算手工特征
+                x_handcrafted_test = self.ml_classifier.calc_handcrafted_features(X_test)
+                
+                # 创建噪声级别的输出目录
+                noise_output_dir = os.path.join(self.config['output_dir'], f"noise_level_{noise_level}")
+                os.makedirs(noise_output_dir, exist_ok=True)
+                
+                # 保存当前输出目录
+                original_output_dir = self.ml_classifier.output_dir
+                self.ml_classifier.output_dir = noise_output_dir
+                
+                # 评估模型
+                logger.info(f"在噪声级别 {noise_level} 上评估机器学习模型...")
+                test_results = self.ml_classifier.evaluate_ml_models(
+                    x_handcrafted_test, 
+                    y_test
+                )
+                
+                # 恢复原始输出目录
+                self.ml_classifier.output_dir = original_output_dir
+                
+                # 从结果中提取指标并添加到汇总表
+                for model_name, result in test_results.items():
+                    if 'classification_report_df' in result:
+                        # 获取最后一行(avg / total)的指标
+                        metrics_row = result['classification_report_df'].iloc[-1]
+                        
+                        # 将结果添加到汇总表
+                        all_results['noise_level'].append(noise_level)
+                        all_results['model'].append(model_name)
+                        all_results['accuracy'].append(metrics_row.get('accuracy', float('nan')))
+                        all_results['precision'].append(metrics_row.get('precision', float('nan')))
+                        all_results['recall'].append(metrics_row.get('recall', float('nan')))
+                        all_results['f1_score'].append(metrics_row.get('f1-score', float('nan')))
+                        
+                        # 为记录创建基于metrics_row的字典
+                        metrics_dict = {
+                            'accuracy': metrics_row.get('accuracy', float('nan')),
+                            'precision': metrics_row.get('precision', float('nan')),
+                            'recall': metrics_row.get('recall', float('nan')),
+                            'f1_score': metrics_row.get('f1-score', float('nan'))
+                        }
+                        
+                        # 将此noise level的结果保存到records文件
+                        utils.register_record(
+                            self.config,
+                            self.config['records_file'],
+                            self.config['initial_timestamp'],
+                            f"{self.config['experiment_name']}_{model_name}_{noise_level}",
+                            metrics_dict,
+                            metrics_dict
+                        )
+                    else:
+                        logger.warning(f"在 {model_name} 的噪声级别 {noise_level} 结果中未找到classification_report_df")
+            
+            # 恢复原始input_type
+            self.config['input_type'] = original_input_type
+            
+            # 将所有noise level的结果保存到一个Excel文件
+            df = pd.DataFrame(all_results)
+            summary_path = os.path.join(self.config['output_dir'], 'ml_noise_level_sweep_results.xlsx')
+            df.to_excel(summary_path, index=False)
+            logger.info(f"不同noise level的机器学习模型汇总结果已保存到: {summary_path}")
+            
+            return df
+        else:
+            # 原始单一noise level测试逻辑
+            # 准备测试数据
+            X_test, y_test = self._prepare_ml_data(self.test_loader)
+            
+            # 计算手工特征
+            x_handcrafted_test = self.ml_classifier.calc_handcrafted_features(X_test)
+            
+            # 评估模型
+            logger.info("在测试集上评估机器学习模型...")
+            test_results = self.ml_classifier.evaluate_ml_models(
+                x_handcrafted_test, 
+                y_test
+            )
+            
+            logger.info("机器学习模型评估完成!")
+            return test_results
 
     def run(self):
         """运行整个训练流程，根据任务类型区分ML和DL"""

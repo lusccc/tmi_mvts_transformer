@@ -10,7 +10,8 @@ from logzero import logger
 
 from utils import check_lat_lng, timestamp_to_hour, calc_initial_compass_bearing, \
     generate_mask_for_feature_using_EP, \
-    generate_mask_for_trj_using_KDE_RPD
+    generate_mask_for_trj_using_KDE_RPD, \
+    generate_random_mask
 from utils import interp_single_seg, interp_trj_seg
 from utils import segment_single_series
 
@@ -44,7 +45,7 @@ ACC_LIMIT_7 = {2: 3, 4: 3, 6: 2, 5: 10, 7: 3, 1: 1, 3: 3, 8: 3}
 
 LIKELY_STOP_DISTANCE_THRESHOLD = 0.5  # meters
 LIKELY_TURN_ANGLE_THRESHOLD = 90  # degree
-MIN_MASK_SEG_LEN = 4
+MIN_MASK_SEG_LEN = 1  #  TODO 
 
 
 def filter_error_gps_data(trjs, labels):
@@ -357,7 +358,13 @@ def do_calc_feature(trj_segs, trj_seg_labels, args):
         # note masks are generated from clean features, using change point detection algorithm
         fs_seg_mask = []
         for fs_seg in cn_multi_feature_seg[:-1]:
-            msk = generate_mask_for_feature_using_EP(fs_seg, args.mean_mask_length)
+            if args.mask_mode == 'ep':
+                msk = generate_mask_for_feature_using_EP(fs_seg, args.mean_mask_length)
+            elif args.mask_mode == 'random':
+                msk = generate_random_mask(fs_seg, args.mask_ratio, args.mean_mask_length)
+            else:
+                logger.warning(f'未知的特征掩码模式: {args.mask_mode}，使用EP模式')
+                msk = generate_mask_for_feature_using_EP(fs_seg, args.mean_mask_length)
             # msk = generate_mask_using_CPD(fs_seg, args.mask_ratio, args.mean_mask_length)
             # msk = generate_mask_using_CPD_unknown_CP_number(fs_seg, args.mean_mask_length)
             fs_seg_mask.append(msk)
@@ -371,10 +378,13 @@ def do_calc_feature(trj_segs, trj_seg_labels, args):
 
         # ************ 7.GENERATE MASK FOR CLEAN TRJ SEG ************
         # generate a mask seg by considering lat and lon SIMULTANEOUSLY
-        # trj_seg_mask = generate_mask_using_CPD(cn_trj_seg, args.mask_ratio, args.mean_mask_length)
-        # trj_seg_mask = generate_mask_using_CPD_unknown_CP_number(cn_trj_seg, args.mean_mask_length)
-        # trj_seg_mask = generate_mask_for_trj_using_KDE(cn_trj_seg, args.mean_mask_length)
-        trj_seg_mask = generate_mask_for_trj_using_KDE_RPD(cn_trj_seg, args.mean_mask_length)
+        if args.trj_mask_mode == 'kde':
+            trj_seg_mask = generate_mask_for_trj_using_KDE_RPD(cn_trj_seg, args.mean_mask_length, args.kde_bw, args.kde_kernel)
+        elif args.trj_mask_mode == 'random':
+            trj_seg_mask = generate_random_mask(cn_trj_seg, args.mask_ratio, args.mean_mask_length)
+        else:
+            logger.warning(f'未知的轨迹掩码模式: {args.trj_mask_mode}，使用KDE模式')
+            trj_seg_mask = generate_mask_for_trj_using_KDE_RPD(cn_trj_seg, args.mean_mask_length, args.kde_bw, args.kde_kernel)
         trj_seg_masks.append(trj_seg_mask)
 
         # generate a mask seg by considering lat and lon SEPARATELY
@@ -414,7 +424,11 @@ if __name__ == '__main__':
     parser.add_argument('--save_dir', type=str, required=True)
 
     parser.add_argument('--mean_mask_length', type=int, default=4, )
-    # parser.add_argument('--mask_ratio', type=float, default=0.3)
+    parser.add_argument('--mask_ratio', type=float, default=0.15, help='掩码占总数据的比例，用于随机掩码')
+    parser.add_argument('--mask_mode', type=str, default='ep', choices=['ep', 'random'], help='特征掩码模式：ep为极值点检测，random为随机掩码')
+    parser.add_argument('--trj_mask_mode', type=str, default='kde', choices=['kde', 'random'], help='轨迹掩码模式：kde为密度估计，random为随机掩码')
+    parser.add_argument('--kde_bw', type=float, default=1, help='bandwidth parameter for FFTKDE')
+    parser.add_argument('--kde_kernel', type=str, default='epa', help='kernel type for FFTKDE (e.g., epa, gaussian)')
 
     args = parser.parse_args()
 
@@ -474,3 +488,6 @@ if __name__ == '__main__':
     #         to_categorical(multi_feature_seg_labels, num_classes=args.n_class))  # labels to one-hot
 
     logger.info('Running time: %s Seconds' % (time.time() - t_start))
+
+
+    # TODO 随机mask的实验

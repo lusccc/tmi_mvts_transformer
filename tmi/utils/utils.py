@@ -126,7 +126,7 @@ def load_dual_branch_model(model, model_path, optimizer=None, resume=False):
         logger.error("提供的模型不是DualTSTransformerEncoderClassifier实例")
         raise TypeError("模型类型不匹配")
     
-    # 验证分支类型
+    # # 验证分支类型
     if not isinstance(model.trajectory_branch, TSTransformerEncoderForDualBranch):
         logger.warning("轨迹分支不是TSTransformerEncoderForDualBranch实例，性能可能受到影响")
         
@@ -254,10 +254,57 @@ def save_model_hyperparams(config, hyperparams):
     #     logger.error('no tmp dir!')
 
 
-def load_model_hyperparams(file_path):
-    with open(file_path) as hp:
-        hyperparams = json.load(hp)
-    return hyperparams
+def load_model_hyperparams(file_path_or_str):
+    """加载模型超参数
+    
+    Args:
+        file_path_or_str: 可以是JSON文件路径，也可以是字符串格式的超参数 
+                         (例如 "feat_dim=4;max_len=128;d_model=128;n_heads=16")
+    
+    Returns:
+        dict: 超参数字典
+    """
+    # 检查是否为字符串格式的超参数
+    if isinstance(file_path_or_str, str) and ';' in file_path_or_str and '=' in file_path_or_str:
+        try:
+            # 解析格式为 "key1=value1;key2=value2;..." 的字符串
+            hyperparams = {}
+            for param in file_path_or_str.split(';'):
+                if '=' in param:
+                    key, value = param.split('=', 1)
+                    key = key.strip()
+                    value = value.strip()
+                    
+                    # 尝试将值转换为适当的数据类型
+                    if value.lower() == 'true':
+                        value = True
+                    elif value.lower() == 'false':
+                        value = False
+                    elif value.isdigit():
+                        value = int(value)
+                    else:
+                        try:
+                            value = float(value)
+                        except ValueError:
+                            # 保持为字符串
+                            pass
+                            
+                    hyperparams[key] = value
+            
+            logger.info(f"从字符串加载超参数: {hyperparams}")
+            return hyperparams
+        except Exception as e:
+            logger.error(f"解析超参数字符串失败: {e}")
+            raise ValueError(f"无法解析超参数字符串: {file_path_or_str}")
+    
+    # 如果不是字符串格式，则视为文件路径
+    try:
+        with open(file_path_or_str) as hp:
+            hyperparams = json.load(hp)
+        return hyperparams
+    except Exception as e:
+        logger.error(f"从文件加载超参数失败: {e}")
+        raise ValueError(f"无法从文件加载超参数: {file_path_or_str}")
 
 
 def create_dirs(dirs):

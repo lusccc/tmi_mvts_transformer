@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader
 from tmi.datasets.dataset import DenoisingDataset, collate_denoising_unsuperv, collate_generic_superv, \
     ImputationDataset, collate_imputation_unsuperv, DualBranchClassificationDataset, collate_dual_branch_superv, \
     GenericClassificationDataset, DenoisingImputationDataset
-from tmi.models.loss import l2_reg_loss
+from tmi.models.loss import l2_reg_loss, mask_length_regularization_loss
 from tmi.models.models import DualTSTransformerEncoderClassifier
 from tmi.utils import utils, analysis
 
@@ -44,6 +44,7 @@ def pipeline_factory(config):
     if task in ['dual_branch_classification', 'dual_branch_classification_from_scratch']:
         return DualBranchClassificationDataset, collate_dual_branch_superv, SupervisedRunner
     if task in ['feature_branch_classification', 'feature_branch_classification_from_scratch',
+                'trajectory_branch_classification',
                 'trajectory_branch_classification_from_scratch', ]:
         return GenericClassificationDataset, collate_generic_superv, SupervisedRunner
     if "cnn_classification" in task or "lstm_classification" in task:
@@ -183,6 +184,7 @@ class BaseRunner(object):
         self.exp_config = exp_config
         self.print_interval = self.exp_config['print_interval']
         self.printer = utils.Printer(console=self.exp_config['console'])
+        self.disable_mask = self.exp_config['disable_mask']
 
         self.epoch_metrics = OrderedDict()
 
@@ -219,13 +221,13 @@ class UnsupervisedRunner(BaseRunner):
             padding_masks = padding_masks.to(self.device)  # 0s: ignore
             target_masks = target_masks.to(self.device)  # 1s: mask and predict, 0s: unaffected input (ignore)
 
-            predictions = self.model(X.to(self.device), padding_masks)  # (batch_size, padded_length, feat_dim)
+            # 将target_masks作为feature_masks传递给模型
+            predictions = self.model(X.to(self.device), padding_masks, 
+                                     None if self.disable_mask else target_masks)  # (batch_size, padded_length, feat_dim)
 
-            # Cascade noise masks (batch_size, padded_length, feat_dim) and padding masks (batch_size, padded_length)
-            loss = self.loss_module(predictions, targets,
-                                    target_masks)  # (num_active,) individual loss (square error per element) for each active value in batch
-            # loss = self.loss_module(predictions, targets,
-            #                         )
+            # 将padding_masks传递给损失函数，以便DenoisingImputationLoss可以正确处理
+            loss = self.loss_module(predictions, targets, target_masks, padding_masks)
+            
             batch_loss = torch.sum(loss)
             mean_loss = batch_loss / len(loss)  # mean loss (over active elements) used for optimization
 
@@ -234,12 +236,17 @@ class UnsupervisedRunner(BaseRunner):
             else:
                 total_loss = mean_loss
 
+            # 添加mask_length正则化，鼓励mask_length_factor探索更广的值域
+            if hasattr(self.model, 'mask_length_factor'):
+                mask_reg_loss = mask_length_regularization_loss(self.model, center_value=0.5, strength=0.005)
+                total_loss = total_loss + mask_reg_loss
+
             # Zero gradients, perform a backward pass, and update the weights.
             self.optimizer.zero_grad()
             total_loss.backward()
 
-            # torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=1.0)
-            # torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=4.0)
+            # 使用梯度裁剪提高训练稳定性
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.optimizer.step()
 
             metrics = {"loss": mean_loss.item()}
@@ -250,57 +257,31 @@ class UnsupervisedRunner(BaseRunner):
             with torch.no_grad():
                 total_samples += len(loss)
                 epoch_loss += batch_loss.item()  # add total loss of batch
-        # with torch.profiler.profile(
-        #         schedule=torch.profiler.schedule(
-        #             wait=2,
-        #             warmup=2,
-        #             active=6,
-        #             repeat=1),
-        #         on_trace_ready=tensorboard_trace_handler('./'),
-        #         with_stack=True
-        # ) as profiler:
-        #     for i, batch in enumerate(self.dataloader):
-        #         X, targets, target_masks, padding_masks, IDs = batch
-        #         targets = targets.to(self.device)
-        #         padding_masks = padding_masks.to(self.device)  # 0s: ignore
-        #         target_masks = target_masks.to(self.device)  # 1s: mask and predict, 0s: unaffected input (ignore)
-        #
-        #         predictions = self.model(X.to(self.device), padding_masks)  # (batch_size, padded_length, feat_dim)
-        #
-        #         # Cascade noise masks (batch_size, padded_length, feat_dim) and padding masks (batch_size, padded_length)
-        #         loss = self.loss_module(predictions, targets,
-        #                                 target_masks)  # (num_active,) individual loss (square error per element) for each active value in batch
-        #         batch_loss = torch.sum(loss)
-        #         mean_loss = batch_loss / len(loss)  # mean loss (over active elements) used for optimization
-        #
-        #         if self.l2_reg:
-        #             total_loss = mean_loss + self.l2_reg * l2_reg_loss(self.model)
-        #         else:
-        #             total_loss = mean_loss
-        #
-        #         # Zero gradients, perform a backward pass, and update the weights.
-        #         self.optimizer.zero_grad()
-        #         total_loss.backward()
-        #
-        #         # torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=1.0)
-        #         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=4.0)
-        #         self.optimizer.step()
-        #         profiler.step()
-        #
-        #         metrics = {"loss": mean_loss.item()}
-        #         if i % self.print_interval == 0:
-        #             ending = "" if epoch_num is None else 'Epoch {} '.format(epoch_num)
-        #             self.print_callback(i, metrics, prefix='Training ' + ending)
-        #
-        #         with torch.no_grad():
-        #             total_samples += len(loss)
-        #             epoch_loss += batch_loss.item()  # add total loss of batch
-        #     print(profiler.key_averages().table(sort_by="cpu_time_total", row_limit=10))
-        #     exit(0)
 
         epoch_loss = epoch_loss / total_samples  # average loss per element for whole epoch
         self.epoch_metrics['epoch'] = epoch_num
         self.epoch_metrics['loss'] = epoch_loss
+        
+        # 记录当前学习到的信号增强值
+        if not self.disable_mask:
+            if hasattr(self.model, 'missing_signal_strength'):
+                signal_value = self.model.missing_signal_strength.item()
+                self.epoch_metrics['signal_strength'] = signal_value
+                logger.info(f"当前学习到的信号增强值: {signal_value:.6f}")
+                
+                # 记录当前学习到的mask长度
+                if hasattr(self.model, 'mask_length_factor'):
+                    factor_value = self.model.mask_length_factor.item()
+                    mask_length = 1 + 9 * torch.sigmoid(torch.tensor(factor_value)).item()  # 更新为1-10范围
+                    self.epoch_metrics['mask_length'] = mask_length
+                    self.epoch_metrics['mask_length_factor'] = factor_value
+                    # 计算上一个epoch的值（如果存在）
+                    prev_factor = getattr(self, 'prev_mask_factor', factor_value)
+                    delta = factor_value - prev_factor
+                    setattr(self, 'prev_mask_factor', factor_value)
+                    
+                    logger.info(f"当前学习到的mask长度: {mask_length:.6f} (factor: {factor_value:.6f}, 变化: {delta:.8f})")
+                
         return self.epoch_metrics
 
     def evaluate(self, epoch_num=None, keep_all=True):
@@ -319,21 +300,12 @@ class UnsupervisedRunner(BaseRunner):
             padding_masks = padding_masks.to(self.device)  # 0s: ignore
             target_masks = target_masks.to(self.device)  # 1s: mask and predict, 0s: unaffected input (ignore)
 
-            # TODO: for debugging
-            # input_ok = utils.check_tensor(X, verbose=False, zero_thresh=1e-8, inf_thresh=1e4)
-            # if not input_ok:
-            #     print("Input problem!")
-            #     ipdb.set_trace()
-            #
-            # utils.check_model(self.model, verbose=False, stop_on_error=True)
+            # 将target_masks作为feature_masks传递给模型
+            predictions = self.model(X.to(self.device), padding_masks, target_masks)  # (batch_size, padded_length, feat_dim)
 
-            predictions = self.model(X.to(self.device), padding_masks)  # (batch_size, padded_length, feat_dim)
-
-            # Cascade noise masks (batch_size, padded_length, feat_dim) and padding masks (batch_size, padded_length)
-            loss = self.loss_module(predictions, targets,
-                                    target_masks)  # (num_active,) individual loss (square error per element) for each active value in batch
-            # loss = self.loss_module(predictions, targets,
-            #                         )
+            # 将padding_masks传递给损失函数，以便DenoisingImputationLoss可以正确处理
+            loss = self.loss_module(predictions, targets, target_masks, padding_masks)
+            
             batch_loss = torch.sum(loss).cpu().item()
             mean_loss = batch_loss / len(loss)  # mean loss (over active elements) used for optimization the batch
 
@@ -385,7 +357,8 @@ class SupervisedRunner(BaseRunner):
                 predictions = self.model(X1, padding_masks1, X2, padding_masks2)
             else:
                 X, targets, padding_masks, IDs = batch  # 0s: ignore
-                predictions = self.model(X, padding_masks)  # for CNN1D_Classifier, padding_masks is not used
+                # 添加feature_masks=None参数保持接口一致
+                predictions = self.model(X, padding_masks, feature_masks=None)  # for CNN1D_Classifier, padding_masks is not used
 
             loss = self.loss_module(predictions, targets)  # (batch_size,) loss for each sample in the batch
             batch_loss = torch.sum(loss)
@@ -396,12 +369,17 @@ class SupervisedRunner(BaseRunner):
             else:
                 total_loss = mean_loss
 
+            # 添加mask_length正则化，鼓励mask_length_factor探索更广的值域
+            if hasattr(self.model, 'mask_length_factor'):
+                mask_reg_loss = mask_length_regularization_loss(self.model, center_value=0.5, strength=0.005)
+                total_loss = total_loss + mask_reg_loss
+
             # Zero gradients, perform a backward pass, and update the weights.
             self.optimizer.zero_grad()
             total_loss.backward()
 
-            # torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=1.0)
-            # torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=4.0) # TODO uncomment this
+            # 使用梯度裁剪提高训练稳定性
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.optimizer.step()
 
             metrics = {"loss": mean_loss.item()}
@@ -416,6 +394,26 @@ class SupervisedRunner(BaseRunner):
         epoch_loss = epoch_loss / total_samples  # average loss per sample for whole epoch
         self.epoch_metrics['epoch'] = epoch_num
         self.epoch_metrics['loss'] = epoch_loss
+        
+        # 记录当前学习到的信号增强值
+        if hasattr(self.model, 'missing_signal_strength'):
+            signal_value = self.model.missing_signal_strength.item()
+            self.epoch_metrics['signal_strength'] = signal_value
+            logger.info(f"当前学习到的信号增强值: {signal_value:.6f}")
+            
+            # 记录当前学习到的mask长度
+            if hasattr(self.model, 'mask_length_factor'):
+                factor_value = self.model.mask_length_factor.item()
+                mask_length = 1 + 9 * torch.sigmoid(torch.tensor(factor_value)).item()  # 更新为1-10范围
+                self.epoch_metrics['mask_length'] = mask_length
+                self.epoch_metrics['mask_length_factor'] = factor_value
+                # 计算上一个epoch的值（如果存在）
+                prev_factor = getattr(self, 'prev_mask_factor', factor_value)
+                delta = factor_value - prev_factor
+                setattr(self, 'prev_mask_factor', factor_value)
+                
+                logger.info(f"当前学习到的mask长度: {mask_length:.6f} (factor: {factor_value:.6f}, 变化: {delta:.8f})")
+                
         return self.epoch_metrics
 
     def evaluate(self, epoch_num=None, keep_all=True, return_dfs=False):
@@ -437,7 +435,8 @@ class SupervisedRunner(BaseRunner):
                 predictions = self.model(X1, padding_masks1, X2, padding_masks2)
             else:
                 X, targets, padding_masks, IDs = batch  # 0s: ignore
-                predictions = self.model(X.to(self.device), padding_masks)
+                # 添加feature_masks=None参数保持接口一致
+                predictions = self.model(X.to(self.device), padding_masks, feature_masks=None)
 
             loss = self.loss_module(predictions, targets)  # (batch_size,) loss for each sample in the batch
             batch_loss = torch.sum(loss).cpu().item()

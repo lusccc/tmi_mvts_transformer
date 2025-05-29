@@ -328,7 +328,7 @@ class GaussianKde(gaussian_kde):
         self.log_det = 2 * np.log(np.diag(L)).sum()  # changed var name on 1.6.2
 
 
-def generate_mask_for_trj_using_KDE_RPD(trj_seg, mean_mask_length=2):
+def generate_mask_for_trj_using_KDE_RPD(trj_seg, mean_mask_length=2, bw=1, kernel='epa'):
     n_points = len(trj_seg)
     x = trj_seg[:, 0]
     y = trj_seg[:, 1]
@@ -357,7 +357,7 @@ def generate_mask_for_trj_using_KDE_RPD(trj_seg, mean_mask_length=2):
     kde_grid[:, [0, 1]] = kde_grid[:, [1, 0]]  # Swap indices
 
     # FFTKDE
-    fit = FFTKDE(bw=1, kernel='epa').fit(data_mir)
+    fit = FFTKDE(bw=bw, kernel=kernel).fit(data_mir)
     z_kde = fit.evaluate(kde_grid)
     z_kde_grid = z_kde.reshape(grid_size_mir, grid_size_mir).T
 
@@ -592,6 +592,65 @@ def generate_mask_using_CPD(seg, mask_ratio=.15, mean_mask_length=3):
         else:
             mask_vec[cp - int(mean_mask_length / 2):cp - int(mean_mask_length / 2) + mean_mask_length] = 0
 
+    return mask_vec
+
+
+def generate_random_mask(seg, mask_ratio=0.15, mean_mask_length=3):
+    """
+    生成随机掩码，按照给定的掩码比例
+    
+    参数:
+    seg: 输入序列
+    mask_ratio: 掩码比例，即需要被掩盖的比例
+    mean_mask_length: 每个掩码段的平均长度
+    
+    返回:
+    mask_vec: 掩码向量，0表示掩码，1表示不掩码
+    """
+    n_points = len(seg)
+    # 计算需要掩码的点数和段数
+    n_mask = round(n_points * mask_ratio)
+    n_segments = max(1, round(n_mask / mean_mask_length))
+    
+    # 确保平均掩码长度至少为1
+    actual_mean_length = max(1, round(n_mask / n_segments))
+    
+    # 初始化掩码向量，默认为1（不掩码）
+    mask_vec = np.ones(n_points)
+    
+    # 随机选择起始点
+    # 为避免重叠，先确定可能的起始位置，然后随机选择
+    remaining_points = n_points - actual_mean_length
+    if remaining_points <= 0 or n_segments <= 0:
+        # 如果序列太短或不需要分段，直接随机选择连续的点
+        start_idx = 0
+        mask_vec[start_idx:start_idx + min(n_mask, n_points)] = 0
+        return mask_vec
+    
+    # 生成n_segments个掩码段
+    possible_starts = list(range(remaining_points + 1))
+    # 如果可能的起始点不足，减少段数
+    n_segments = min(n_segments, len(possible_starts))
+    
+    # 随机选择不重叠的起始点
+    starts = sorted(np.random.choice(possible_starts, n_segments, replace=False))
+    
+    # 应用掩码
+    for start in starts:
+        end = min(start + actual_mean_length, n_points)
+        mask_vec[start:end] = 0
+    
+    # 确保总掩码数量接近目标值
+    current_masks = n_points - np.sum(mask_vec)
+    if current_masks < n_mask and np.any(mask_vec == 1):
+        # 如果掩码不足，随机增加掩码
+        remaining_indices = np.where(mask_vec == 1)[0]
+        # 确保n_additional是整数
+        n_additional = min(int(n_mask - current_masks), len(remaining_indices))
+        if n_additional > 0:
+            additional_indices = np.random.choice(remaining_indices, n_additional, replace=False)
+            mask_vec[additional_indices] = 0
+    
     return mask_vec
 
 

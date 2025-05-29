@@ -10,6 +10,8 @@ from logzero import logger
 
 config = None
 
+random.seed(10086)
+
 
 def collate_generic_superv(data, max_len=None):
     """Build mini-batch tensors from a list of (X, mask) tuples. Mask input. Create
@@ -111,14 +113,13 @@ def collate_imputation_unsuperv(data, ):
         X_noise[i, :end, :] = noise_features[i][:end, :]
         X_clean[i, :end, :] = clean_features[i][:end, :]
         target_masks[i, :end, :] = masks[i][:end, :]
-
-    X_noise = X_noise * target_masks  # mask input
-
+    
     padding_masks = padding_mask(torch.tensor(lengths, dtype=torch.int16),
                                  max_len=max_len)  # (batch_size, padded_length) boolean tensor, "1" means keep
     # target masks mean the mask impose on y_pred, here is X_clean
     # inverse logic: 0 now means ignore, 1 means predict
-    target_masks = ~target_masks
+    # 仅在有效区域内取反，padding区域保持为0
+    target_masks = ~target_masks & padding_masks.unsqueeze(-1)
 
     # logger.info('collate_imputation_unsuperv time: %s Seconds' % (time.time() - t_start))
 
@@ -145,14 +146,10 @@ def collate_denoising_unsuperv(data, max_len=None, ):
 
     padding_masks = padding_mask(torch.tensor(lengths, dtype=torch.int16),
                                  max_len=max_len)  # (batch_size, padded_length) boolean tensor, "1" means keep
-    target_masks = padding_masks.unsqueeze(-1).repeat(1, 1, clean_features[0].shape[
-        -1])  # (batch_size, padded_length, feat_dim)
-
+    target_masks = padding_masks.unsqueeze(-1).repeat(1, 1, clean_features[0].shape[-1])  # (batch_size, padded_length, feat_dim)
+    
     # logger.info('collate_denoising_unsuperv time: %s Seconds' % (time.time() - t_start))
 
-    # below is incorrect, padding_masks should not be inverted
-    # target_masks = ~padding_masks.unsqueeze(-1).repeat(1, 1, clean_features[0].shape[
-    #     -1])  # (batch_size, padded_length, feat_dim)
     return X_noise, X_clean, target_masks, padding_masks, IDs
 
 
@@ -228,7 +225,7 @@ class GenericClassificationDataset(Dataset):
             y: (num_labels,) tensor of labels (num_labels > 1 for multi-task models) for each sample
             ID: ID of sample
         """
-        ind = int(ind / 2)
+        # ind = int(ind / 2)
         ID = self.IDs[ind]
         
         # 直接从缓存字典获取数据
@@ -248,8 +245,8 @@ class GenericClassificationDataset(Dataset):
         return torch.from_numpy(input), torch.from_numpy(target), ID
 
     def __len__(self):
-        return len(self.IDs) * 2
-
+        # return len(self.IDs) * 2
+        return len(self.IDs)
 
 class DenoisingDataset(Dataset):
     def __init__(self, data, indices, exclude_feats=None):
@@ -357,8 +354,9 @@ class DenoisingImputationDataset(Dataset):
         X_clean = self.clean_features[ID]
         mask = self.masks[ID].copy()  # 复制一份，防止修改原始数据
 
+        # 当disable_mask为True时，将掩码设为全1
         if self.disable_mask:
-            mask[:] = 0
+            mask[:] = 1
 
         # 使用概率来决定是否使用noise数据
         noise_input = random.random() < self.noise_prob
@@ -480,7 +478,7 @@ class DualBranchClassificationDataset(Dataset):
         self.noise_prob = new_prob
 
     def __getitem__(self, ind):
-        ind = int(ind / 2)
+        # ind = int(ind / 2)
         ID = self.IDs[ind]
         
         # 使用概率来决定是否使用noise数据
@@ -498,4 +496,5 @@ class DualBranchClassificationDataset(Dataset):
         return torch.from_numpy(X1), torch.from_numpy(X2), torch.from_numpy(y), torch.as_tensor(ID)
 
     def __len__(self):
-        return len(self.IDs) * 2
+        # return len(self.IDs) * 2
+        return len(self.IDs)

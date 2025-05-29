@@ -17,6 +17,11 @@ def model_factory(config, data):
     """
     Args:
         data: if task == 'dual_branch_classification', data include trj data and trj feature data
+        
+    Notes:
+        超参数可以通过两种方式传入:
+        1. 传统方式: 通过JSON文件路径 (config['trajectory_branch_hyperparams'] = "path/to/hyperparams.json")
+        2. 字符串方式: 通过分号分隔的键值对 (config['trajectory_branch_hyperparams'] = "feat_dim=4;max_len=128;d_model=128")
     """
     task = config['task']
     if task in ['imputation_pretrain', 'denoising_pretrain', 'denoising_imputation_pretrain']:
@@ -55,7 +60,11 @@ def model_factory(config, data):
                                               num_classes=len(data.class_names))
     if task in ['feature_branch_classification_from_scratch', 'trajectory_branch_classification_from_scratch']:
         if config['test_only']:
-            return TSTransformerEncoderClassifier(**utils.load_model_hyperparams(config['feature_branch_hyperparams']))
+            # 根据task类型加载正确的超参数
+            if task == 'feature_branch_classification_from_scratch':
+                return TSTransformerEncoderClassifier(**utils.load_model_hyperparams(config['feature_branch_hyperparams']))
+            else:  # trajectory_branch_classification_from_scratch
+                return TSTransformerEncoderClassifier(**utils.load_model_hyperparams(config['trajectory_branch_hyperparams']))
         else:
             feat_dim = data.noise_feature_df.shape[1]
             max_seq_len = data.max_seq_len
@@ -67,8 +76,8 @@ def model_factory(config, data):
             utils.save_model_hyperparams(config, model.hyperparams)                                     
             return model
     if 'cnn_classification' in task:
-        # return CNN1DClassifier_128()
-        return CNN1DClassifier_200()
+        return CNN1DClassifier_128()
+        # return CNN1DClassifier_200()
     if 'lstm_classification' in task:
         return MSRLSTMClassifier()
 
@@ -227,7 +236,9 @@ class TSTransformerEncoder(nn.Module):
         self.n_heads = n_heads
         self.dropout = dropout
         self.activation = activation
+        self.feat_dim = feat_dim
 
+        # 标准输入投影层
         self.project_inp = nn.Linear(feat_dim, d_model)
         self.pos_enc = get_pos_encoder(pos_encoding)(d_model, dropout=dropout * (1.0 - freeze), max_len=max_len)
 
@@ -239,35 +250,182 @@ class TSTransformerEncoder(nn.Module):
                                                              dropout * (1.0 - freeze), activation=activation)
 
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
-
         self.output_layer = nn.Linear(d_model, feat_dim)
-
         self.act = _get_activation_fn(activation)
-
         self.dropout1 = nn.Dropout(dropout)
+        
+        # 定义可学习的信号增强参数
+        self.missing_signal_strength = nn.Parameter(torch.tensor(0.05))
+        
+        # 定义可学习的mask聚合长度参数
+        # 初始值设为0.0，通过映射到更宽区间使模型有更大的调整空间
+        # 在forward中将映射到1-10的范围，而非仅1-5
+        self.mask_length_factor = nn.Parameter(torch.tensor(0.0))
+        
+        # 应用自定义权重初始化以提高数值稳定性
+        self._init_weights()
 
-        self.feat_dim = feat_dim
+    def _init_weights(self):
+        """
+        使用Xavier均匀初始化对模型权重进行初始化，以提高数值稳定性
+        """
+        for name, p in self.named_parameters():
+            if 'weight' in name and len(p.shape) >= 2:
+                # 线性层使用Xavier均匀初始化
+                nn.init.xavier_uniform_(p, gain=0.5)
+            elif 'bias' in name:
+                # 偏置项初始化为0
+                nn.init.zeros_(p)
+        
+        # 特别处理多头注意力层的权重，使用更保守的初始化
+        for layer in self.transformer_encoder.layers:
+            if hasattr(layer, 'self_attn'):
+                # 对注意力权重使用更小的初始值范围
+                for name, p in layer.self_attn.named_parameters():
+                    if 'weight' in name:
+                        nn.init.xavier_uniform_(p, gain=0.2)
+                    elif 'bias' in name:
+                        nn.init.zeros_(p)
+                        
+        # 对输出层使用更小的初始化范围
+        nn.init.xavier_uniform_(self.output_layer.weight, gain=0.1)
+        nn.init.zeros_(self.output_layer.bias)
 
-    def forward(self, X, padding_masks):
+    def create_custom_attention_mask(self, feature_masks, padding_masks):
+        """
+        创建自定义注意力掩码，并支持自适应mask长度
+        
+        Args:
+            feature_masks: (batch_size, seq_length, feat_dim) 特征掩码，1表示需要预测的位置(即缺失位置)
+            padding_masks: (batch_size, seq_length) 填充掩码，1表示有效位置，0表示填充位置
+            
+        Returns:
+            attn_mask: (seq_length, seq_length) 全局注意力掩码
+            missing_stats: 字典，包含缺失特征的统计信息
+        """
+        batch_size, seq_length, feat_dim = feature_masks.shape
+        device = feature_masks.device
+        
+        # 1. 确定每个时间步是否有需要预测的特征(缺失值) - (batch_size, seq_length)
+        has_missing = torch.any(feature_masks, dim=2)
+        
+        # 2. 创建标准因果掩码 (所有批次共用)
+        causal_mask = torch.ones(seq_length, seq_length, device=device).triu(diagonal=1)
+        
+        # 3. 使用全局掩码 + 输入信号增强的方式
+        # 将因果掩码转换为float，并将1替换为一个非常大但有限的负数
+        attn_mask = causal_mask.float() * -1e9
+        
+        # 4. 生成缺失特征的统计信息，用于在forward方法中增强输入
+        missing_stats = {
+            'has_missing': has_missing,
+            'missing_ratio': has_missing.float().mean().item(),
+            'causal_only': causal_mask
+        }
+        
+        return attn_mask, missing_stats
+
+    def forward(self, X, padding_masks, feature_masks=None):
         """
         Args:
-            X: (batch_size, seq_length, feat_dim) torch tensor of masked features (input)
-            padding_masks: (batch_size, seq_length) boolean tensor, 1 means keep vector at this position, 0 means padding
+            X: (batch_size, seq_length, feat_dim) 原始特征输入
+            padding_masks: (batch_size, seq_length) 填充掩码，1表示保留该位置，0表示填充位置
+            feature_masks: (batch_size, seq_length, feat_dim) 特征掩码，1表示需要预测的位置(即缺失位置)
+            
         Returns:
-            output: (batch_size, seq_length, feat_dim)
+            output: (batch_size, seq_length, feat_dim) 输出特征
         """
-
-        # permute because pytorch convention for transformers is [seq_length, batch_size, feat_dim]. padding_masks [batch_size, feat_dim]
-        inp = X.permute(1, 0, 2)
-        inp = self.project_inp(inp) * math.sqrt(
-            self.d_model)  # [seq_length, batch_size, d_model] project input vectors to d_model dimensional space
-        inp = self.pos_enc(inp)  # add positional encoding
-        # NOTE: logic for padding masks is reversed to comply with definition in MultiHeadAttention, TransformerEncoderLayer
-        output = self.transformer_encoder(inp, src_key_padding_mask=~padding_masks)  # (seq_length, batch_size, d_model)
-        output = self.act(output)  # the output transformer encoder/decoder embeddings don't include non-linearity
+        batch_size, seq_length, feat_dim = X.shape
+        device = X.device
+        
+        # 基本投影：将输入从feat_dim投影到d_model
+        inp = X.permute(1, 0, 2)  # (seq_length, batch_size, feat_dim)
+        inp = self.project_inp(inp) * math.sqrt(self.d_model)  # (seq_length, batch_size, d_model)
+        
+        # 添加位置编码
+        inp = self.pos_enc(inp)  # (seq_length, batch_size, d_model)
+        
+        # 创建注意力掩码
+        attn_mask = None
+        
+        # 处理feature_masks以创建自定义注意力掩码
+        if feature_masks is not None:
+            # 计算自适应mask长度 (将mask_length_factor映射到合理范围)
+            # 直接在forward方法中计算，确保计算图连接正确
+            mask_length = 1.0 + 9.0 * torch.sigmoid(self.mask_length_factor)  # 映射到1-10范围内
+            
+            # 使用优化后的掩码创建方法
+            attn_mask, missing_stats = self.create_custom_attention_mask(feature_masks, padding_masks)
+            
+            # 使用向量化操作高效地增强输入
+            if torch.any(feature_masks):
+                # 获取时间步级别的缺失信息
+                has_missing = missing_stats['has_missing']  # (batch_size, seq_length)
+                
+                # 将信息转换到正确的形状并添加到输入中
+                missing_signal = has_missing.permute(1, 0).unsqueeze(2).float()
+                
+                # 创建增强信号并广播
+                clamped_strength = torch.clamp(self.missing_signal_strength, 0.0, 0.5)
+                enhancement = torch.zeros_like(inp)
+                enhancement = enhancement + missing_signal * clamped_strength
+                
+                # 计算基础增强信号
+                base_enhancement = enhancement.clone()
+                
+                # 应用自适应mask长度：将缺失信号向周围时间步传播
+                # 只有当mask_length > 1.0时才进行传播
+                if mask_length > 1.0:
+                    # 为了数值稳定性，使用detach复制当前mask_length值仅用于控制流
+                    # 但计算权重时仍使用原始mask_length保持计算图
+                    mask_length_value = mask_length.detach().item()
+                    spread_steps = max(1, int(round(mask_length_value - 1)))
+                    
+                    # mask长度影响因子 - 随mask_length增大而增强 (保持梯度流)
+                    # 这将使更长的mask产生更强的影响，增强梯度信号
+                    mask_impact = 0.5 + 0.5 * (mask_length - 1.0) / 9.0  # 随着mask_length从1到10变化，影响从0.5到1.0
+                    
+                    # 创建扩散权重，越靠近缺失位置权重越大
+                    for step in range(1, spread_steps + 1):
+                        # 计算权重，直接使用mask_length参与计算，保持梯度链接
+                        # 归一化步骤，确保步骤在0-1范围内
+                        step_ratio = torch.tensor(step, dtype=torch.float, device=device) / (mask_length - 1.0 + 1e-6)
+                        # 线性衰减权重，添加mask_impact因子增强梯度
+                        weight_scale = (1.0 - step_ratio) * (mask_length > 1.0).float() * mask_impact
+                        
+                        # 向前传播
+                        if step < seq_length:
+                            forward_weight = clamped_strength * weight_scale
+                            shifted_signal = torch.cat([
+                                missing_signal[step:], 
+                                torch.zeros(step, batch_size, 1, device=device)
+                            ], dim=0)
+                            enhancement = enhancement + shifted_signal * forward_weight
+                            
+                        # 向后传播
+                        if step < seq_length:
+                            backward_weight = clamped_strength * weight_scale
+                            shifted_signal = torch.cat([
+                                torch.zeros(step, batch_size, 1, device=device),
+                                missing_signal[:-step] if step < seq_length else torch.zeros(0, batch_size, 1, device=device)
+                            ], dim=0)
+                            enhancement = enhancement + shifted_signal * backward_weight
+                
+                # 将增强信号添加到原始输入
+                inp = inp + enhancement
+                
+                # 保存当前的mask_length值用于监控
+                missing_stats['mask_length'] = mask_length.detach().item()
+        
+        # 应用Transformer编码器
+        # 使用padding_masks来屏蔽填充位置
+        output = self.transformer_encoder(inp, 
+                                        #  mask=attn_mask,  # TODO 并没有使用因果掩码矩阵！！！
+                                         src_key_padding_mask=~padding_masks)  # (seq_length, batch_size, d_model)
+        
+        output = self.act(output)  # 应用激活函数
         output = output.permute(1, 0, 2)  # (batch_size, seq_length, d_model)
         output = self.dropout1(output)
-        # Most probably defining a Linear(d_model,feat_dim) vectorizes the operation over (seq_length, batch_size).
         output = self.output_layer(output)  # (batch_size, seq_length, feat_dim)
 
         return output
@@ -275,8 +433,7 @@ class TSTransformerEncoder(nn.Module):
 
 class TSTransformerEncoderClassifier(nn.Module):
     """
-    Simplest classifier/regressor. Can be either regressor or classifier because the output does not include
-    softmax. Concatenates final layer embeddings and uses 0s to ignore padding embeddings in final output layer.
+    通用的Transformer编码器分类器基类，可用于单分支分类任务。
     """
 
     def __init__(self, feat_dim, max_len, d_model, n_heads, num_layers, dim_feedforward, num_classes,
@@ -288,124 +445,175 @@ class TSTransformerEncoderClassifier(nn.Module):
         self.max_len = max_len
         self.d_model = d_model
         self.n_heads = n_heads
-
-        self.project_inp = nn.Linear(feat_dim, d_model)
-        self.pos_enc = get_pos_encoder(pos_encoding)(d_model, dropout=dropout * (1.0 - freeze), max_len=max_len)
-
-        if norm == 'LayerNorm':
-            encoder_layer = TransformerEncoderLayer(d_model, self.n_heads, dim_feedforward, dropout * (1.0 - freeze),
-                                                    activation=activation)
-        else:
-            encoder_layer = TransformerBatchNormEncoderLayer(d_model, self.n_heads, dim_feedforward,
-                                                             dropout * (1.0 - freeze), activation=activation)
-
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
-
-        self.act = _get_activation_fn(activation)
-
-        self.dropout1 = nn.Dropout(dropout)
-
         self.feat_dim = feat_dim
         self.num_classes = num_classes
+        self.dropout = dropout
+        
+        # 标准输入投影层
+        self.project_inp = nn.Linear(feat_dim, d_model)
+        
+        self.pos_enc = get_pos_encoder(pos_encoding)(d_model, dropout=dropout * (1.0 - freeze), max_len=max_len)
+        
+        if norm == 'LayerNorm':
+            encoder_layer = TransformerEncoderLayer(d_model, self.n_heads, dim_feedforward, dropout * (1.0 - freeze),
+                                                  activation=activation)
+        else:
+            encoder_layer = TransformerBatchNormEncoderLayer(d_model, self.n_heads, dim_feedforward,
+                                                           dropout * (1.0 - freeze), activation=activation)
+        
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
+        
+        # 分类层，不同于TSTransformerEncoder的输出层
         self.output_layer = self.build_output_module(d_model, max_len, num_classes)
+        
+        self.act = _get_activation_fn(activation)
+        self.dropout1 = nn.Dropout(dropout)
+        
+        # 定义可学习的信号增强参数
+        self.missing_signal_strength = nn.Parameter(torch.tensor(0.05))
+        
+        # 创建TSTransformerEncoder实例以复用其create_custom_attention_mask方法
+        self.encoder_helper = TSTransformerEncoder(
+            feat_dim=feat_dim, 
+            max_len=max_len, 
+            d_model=d_model, 
+            n_heads=n_heads, 
+            num_layers=0,  # 不需要实际的层
+            dim_feedforward=dim_feedforward, 
+            dropout=dropout,
+            pos_encoding=pos_encoding,
+            activation=activation,
+            norm=norm,
+            freeze=freeze
+        )
 
     def build_output_module(self, d_model, max_len, num_classes):
-        # 使用更高效的特征提取方式而不是简单展平
-        # 利用全局平均池化和全局最大池化捕获序列中的关键信息
-        # 这大大减少了参数量，同时保留了时间序列中的关键特征
+        """构建分类输出模块，将编码器的输出映射到类别概率"""
+        # 计算输入特征大小 - 扁平化的d_model特征
+        input_size = max_len * d_model
         
-        class TemporalFeatureExtractor(nn.Module):
-            def __init__(self, d_model, max_len, num_classes):
-                super(TemporalFeatureExtractor, self).__init__()
-                # 输入: (batch_size, seq_length * d_model) 来自展平的序列
-                # 也可以接收 (batch_size, seq_length, d_model) 的输入并处理
-                
-                self.d_model = d_model
-                self.max_len = max_len
-                
-                # 特征提取层
-                self.feature_extractor = nn.Sequential(
-                    # 关注时间维度的卷积，保留全部特征维度
-                    nn.Conv1d(d_model, d_model, kernel_size=3, padding=1),
-                    nn.BatchNorm1d(d_model),
-                    nn.GELU(),
-                    nn.Conv1d(d_model, d_model, kernel_size=3, padding=1),
-                    nn.BatchNorm1d(d_model),
-                    nn.GELU(),
-                )
-                
-                # 多尺度聚合模块
-                hidden_size = d_model * 2  # 平均池化和最大池化的拼接
-                
-                # 分类头
-                self.classifier = nn.Sequential(
-                    nn.Linear(hidden_size, hidden_size // 2),
-                    nn.BatchNorm1d(hidden_size // 2),
-                    nn.GELU(),
-                    nn.Dropout(0.2),
-                    nn.Linear(hidden_size // 2, num_classes)
-                )
-            
-            def forward(self, x):
-                # 输入可能是展平的 (batch_size, seq_length * d_model)
-                if x.dim() == 2:
-                    batch_size = x.size(0)
-                    x = x.view(batch_size, self.max_len, self.d_model)
-                
-                # 转置为卷积1D格式 (batch_size, d_model, seq_length)
-                x = x.transpose(1, 2)
-                
-                # 应用特征提取
-                x = self.feature_extractor(x)
-                
-                # 全局池化: 两种聚合方式捕获不同类型的特征
-                avg_pool = torch.mean(x, dim=2)  # 全局平均池化
-                max_pool, _ = torch.max(x, dim=2)  # 全局最大池化
-                
-                # 拼接不同的池化结果
-                x = torch.cat([avg_pool, max_pool], dim=1)
-                
-                # 分类
-                x = self.classifier(x)
-                return x
-        
-        return TemporalFeatureExtractor(d_model, max_len, num_classes)
+        # 创建分类层
+        return nn.Sequential(
+            nn.Linear(input_size, 256),
+            nn.BatchNorm1d(256),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(256, num_classes)
+        )
 
-    def forward(self, X, padding_masks):
+    def forward(self, X, padding_masks, feature_masks=None):
         """
         Args:
-            X: (batch_size, seq_length, feat_dim) torch tensor of masked features (input)
-            padding_masks: (batch_size, seq_length) boolean tensor, 1 means keep vector at this position, 0 means padding
+            X: (batch_size, seq_length, feat_dim) 原始特征输入
+            padding_masks: (batch_size, seq_length) 填充掩码，1表示保留该位置，0表示填充位置 
+            feature_masks: (batch_size, seq_length, feat_dim) 特征掩码，1表示需要预测的位置(即缺失位置)
+            
         Returns:
-            output: (batch_size, num_classes)
+            output: (batch_size, d_output)
         """
-
-        # permute because pytorch convention for transformers is [seq_length, batch_size, feat_dim]. padding_masks [batch_size, feat_dim]
-        inp = X.permute(1, 0, 2)
-        inp = self.project_inp(inp) * math.sqrt(
-            self.d_model)  # [seq_length, batch_size, d_model] project input vectors to d_model dimensional space
-        inp = self.pos_enc(inp)  # add positional encoding
-        # NOTE: logic for padding masks is reversed to comply with definition in MultiHeadAttention, TransformerEncoderLayer
-        output = self.transformer_encoder(inp, src_key_padding_mask=~padding_masks)  # (seq_length, batch_size, d_model)
-        output = self.act(output)  # the output transformer encoder/decoder embeddings don't include non-linearity
+        batch_size, seq_length, feat_dim = X.shape
+        device = X.device
+        
+        # 基本投影：将输入从feat_dim投影到d_model
+        inp = X.permute(1, 0, 2)  # (seq_length, batch_size, feat_dim)
+        inp = self.project_inp(inp) * math.sqrt(self.d_model)  # (seq_length, batch_size, d_model)
+        
+        # 添加位置编码
+        inp = self.pos_enc(inp)  # (seq_length, batch_size, d_model)
+        
+        # 创建注意力掩码
+        attn_mask = None
+        
+        # 处理feature_masks以创建自定义注意力掩码
+        if feature_masks is not None:
+            # 计算自适应mask长度，确保梯度传播
+            mask_length = 1.0 + 9.0 * torch.sigmoid(self.missing_signal_strength.new_tensor(self.encoder_helper.mask_length_factor))
+            
+            # 使用优化后的掩码创建方法
+            attn_mask, missing_stats = self.encoder_helper.create_custom_attention_mask(feature_masks, padding_masks)
+            
+            # 使用向量化操作高效地增强输入
+            if torch.any(feature_masks):
+                # 获取时间步级别的缺失信息
+                has_missing = missing_stats['has_missing']  # (batch_size, seq_length)
+                
+                # 将信息转换到正确的形状并添加到输入中
+                missing_signal = has_missing.permute(1, 0).unsqueeze(2).float()
+                
+                # 创建增强信号并广播
+                clamped_strength = torch.clamp(self.missing_signal_strength, 0.0, 0.5)
+                enhancement = torch.zeros_like(inp)
+                enhancement = enhancement + missing_signal * clamped_strength
+                
+                # 计算基础增强信号
+                base_enhancement = enhancement.clone()
+                
+                # 应用自适应mask长度：将缺失信号向周围时间步传播
+                # 只有当mask_length > 1.0时才进行传播
+                if mask_length > 1.0:
+                    # 为了数值稳定性，使用detach复制当前mask_length值仅用于控制流
+                    # 但计算权重时仍使用原始mask_length保持计算图
+                    mask_length_value = mask_length.detach().item()
+                    spread_steps = max(1, int(round(mask_length_value - 1)))
+                    
+                    # mask长度影响因子 - 随mask_length增大而增强 (保持梯度流)
+                    # 这将使更长的mask产生更强的影响，增强梯度信号
+                    mask_impact = 0.5 + 0.5 * (mask_length - 1.0) / 9.0  # 随着mask_length从1到10变化，影响从0.5到1.0
+                    
+                    # 创建扩散权重，越靠近缺失位置权重越大
+                    for step in range(1, spread_steps + 1):
+                        # 计算权重，直接使用mask_length参与计算，保持梯度链接
+                        # 归一化步骤，确保步骤在0-1范围内
+                        step_ratio = torch.tensor(step, dtype=torch.float, device=device) / (mask_length - 1.0 + 1e-6)
+                        # 线性衰减权重，添加mask_impact因子增强梯度
+                        weight_scale = (1.0 - step_ratio) * (mask_length > 1.0).float() * mask_impact
+                        
+                        # 向前传播
+                        if step < seq_length:
+                            forward_weight = clamped_strength * weight_scale
+                            shifted_signal = torch.cat([
+                                missing_signal[step:], 
+                                torch.zeros(step, batch_size, 1, device=device)
+                            ], dim=0)
+                            enhancement = enhancement + shifted_signal * forward_weight
+                            
+                        # 向后传播
+                        if step < seq_length:
+                            backward_weight = clamped_strength * weight_scale
+                            shifted_signal = torch.cat([
+                                torch.zeros(step, batch_size, 1, device=device),
+                                missing_signal[:-step] if step < seq_length else torch.zeros(0, batch_size, 1, device=device)
+                            ], dim=0)
+                            enhancement = enhancement + shifted_signal * backward_weight
+                
+                # 将增强信号添加到原始输入
+                inp = inp + enhancement
+        
+        # 应用Transformer编码器
+        output = self.transformer_encoder(inp, 
+                                        mask=attn_mask,
+                                        src_key_padding_mask=~padding_masks)  # (seq_length, batch_size, d_model)
+        
+        output = self.act(output)  # 应用激活函数
         output = output.permute(1, 0, 2)  # (batch_size, seq_length, d_model)
         output = self.dropout1(output)
-
-        # Output
-        output = output * padding_masks.unsqueeze(-1)  # zero-out padding embeddings, i.e., make padding to 0s
-        output = output.reshape(output.shape[0], -1)  # (batch_size, seq_length * d_model)
-        output = self.output_layer(output)  # (batch_size, num_classes)
-
+        
+        # 应用掩码以忽略填充位置
+        masked_output = output * padding_masks.unsqueeze(-1)  # 将填充位置置零
+        
+        # 扁平化特征
+        flattened = masked_output.reshape(masked_output.shape[0], -1)  # (batch_size, seq_length * d_model)
+        
+        # 应用分类层
+        output = self.output_layer(flattened)  # (batch_size, num_classes)
+        
         return output
 
 
-# 新增一个专用于双分支模型的TSTransformerEncoder子类
 class TSTransformerEncoderForDualBranch(TSTransformerEncoder):
-    """为双分支模型特别优化的TSTransformerEncoder版本
-    
-    与标准TSTransformerEncoder的主要区别:
-    1. 输出层被替换为Flatten
-    2. 优化了内部结构以支持DualTSTransformerEncoderClassifier
+    """
+    专为双分支模型设计的Transformer编码器，输出扁平化的特征表示。
+    继承自TSTransformerEncoder以重用基础功能。
     """
     
     def __init__(self, feat_dim, max_len, d_model, n_heads, num_layers, dim_feedforward, dropout=0.1,
@@ -414,34 +622,122 @@ class TSTransformerEncoderForDualBranch(TSTransformerEncoder):
             feat_dim, max_len, d_model, n_heads, num_layers, dim_feedforward, 
             dropout, pos_encoding, activation, norm, freeze
         )
-        # 替换输出层为Flatten而不是线性层
-        self.output_layer = nn.Flatten()
         
-    def forward(self, X, padding_masks):
+        # 移除原始TSTransformerEncoder的输出层，直接使用扁平化
+        delattr(self, 'output_layer')
+        
+        # 确保继承了可学习的信号增强参数
+        # self.missing_signal_strength在父类已定义
+
+    def forward(self, X, padding_masks, feature_masks=None):
         """
+        前向传播函数，输出扁平化的特征表示
+        
         Args:
-            X: (batch_size, seq_length, feat_dim) torch tensor of masked features (input)
-            padding_masks: (batch_size, seq_length) boolean tensor, 1 means keep vector at this position, 0 means padding
+            X: (batch_size, seq_length, feat_dim) 原始特征输入
+            padding_masks: (batch_size, seq_length) 填充掩码，1表示保留该位置，0表示填充位置
+            feature_masks: (batch_size, seq_length, feat_dim) 特征掩码，1表示需要预测的位置(即缺失位置)
+            
         Returns:
-            output: (batch_size, seq_length * d_model) 扁平化的特征向量
+            output: (batch_size, seq_length * d_model) 扁平化的特征表示
         """
-        # 重用父类的Transformer编码器逻辑
-        inp = X.permute(1, 0, 2)
-        inp = self.project_inp(inp) * math.sqrt(self.d_model)
-        inp = self.pos_enc(inp)
-        output = self.transformer_encoder(inp, src_key_padding_mask=~padding_masks)
+        batch_size, seq_length, feat_dim = X.shape
+        device = X.device
+        
+        # 基本投影：将输入从feat_dim投影到d_model
+        inp = X.permute(1, 0, 2)  # (seq_length, batch_size, feat_dim)
+        inp = self.project_inp(inp) * math.sqrt(self.d_model)  # (seq_length, batch_size, d_model)
+        
+        # 添加位置编码
+        inp = self.pos_enc(inp)  # (seq_length, batch_size, d_model)
+        
+        # 创建注意力掩码
+        attn_mask = None
+        
+        # 处理feature_masks以创建自定义注意力掩码
+        if feature_masks is not None:
+            # 计算自适应mask长度，直接在forward方法中计算以确保计算图连接
+            mask_length = 1.0 + 9.0 * torch.sigmoid(self.mask_length_factor)
+            
+            # 使用优化后的掩码创建方法
+            attn_mask, missing_stats = self.create_custom_attention_mask(feature_masks, padding_masks)
+            
+            # 使用向量化操作高效地增强输入
+            if torch.any(feature_masks):
+                # 获取时间步级别的缺失信息
+                has_missing = missing_stats['has_missing']  # (batch_size, seq_length)
+                
+                # 将信息转换到正确的形状并添加到输入中
+                missing_signal = has_missing.permute(1, 0).unsqueeze(2).float()
+                
+                # 创建增强信号并广播
+                clamped_strength = torch.clamp(self.missing_signal_strength, 0.0, 0.5)
+                enhancement = torch.zeros_like(inp)
+                enhancement = enhancement + missing_signal * clamped_strength
+                
+                # 计算基础增强信号
+                base_enhancement = enhancement.clone()
+                
+                # 应用自适应mask长度：将缺失信号向周围时间步传播
+                # 只有当mask_length > 1.0时才进行传播
+                if mask_length > 1.0:
+                    # 为了数值稳定性，使用detach复制当前mask_length值仅用于控制流
+                    # 但计算权重时仍使用原始mask_length保持计算图
+                    mask_length_value = mask_length.detach().item()
+                    spread_steps = max(1, int(round(mask_length_value - 1)))
+                    
+                    # mask长度影响因子 - 随mask_length增大而增强 (保持梯度流)
+                    # 这将使更长的mask产生更强的影响，增强梯度信号
+                    mask_impact = 0.5 + 0.5 * (mask_length - 1.0) / 9.0  # 随着mask_length从1到10变化，影响从0.5到1.0
+                    
+                    # 创建扩散权重，越靠近缺失位置权重越大
+                    for step in range(1, spread_steps + 1):
+                        # 计算权重，直接使用mask_length参与计算，保持梯度链接
+                        # 归一化步骤，确保步骤在0-1范围内
+                        step_ratio = torch.tensor(step, dtype=torch.float, device=device) / (mask_length - 1.0 + 1e-6)
+                        # 线性衰减权重，添加mask_impact因子增强梯度
+                        weight_scale = (1.0 - step_ratio) * (mask_length > 1.0).float() * mask_impact
+                        
+                        # 向前传播
+                        if step < seq_length:
+                            forward_weight = clamped_strength * weight_scale
+                            shifted_signal = torch.cat([
+                                missing_signal[step:], 
+                                torch.zeros(step, batch_size, 1, device=device)
+                            ], dim=0)
+                            enhancement = enhancement + shifted_signal * forward_weight
+                            
+                        # 向后传播
+                        if step < seq_length:
+                            backward_weight = clamped_strength * weight_scale
+                            shifted_signal = torch.cat([
+                                torch.zeros(step, batch_size, 1, device=device),
+                                missing_signal[:-step] if step < seq_length else torch.zeros(0, batch_size, 1, device=device)
+                            ], dim=0)
+                            enhancement = enhancement + shifted_signal * backward_weight
+                
+                # 将增强信号添加到原始输入
+                inp = inp + enhancement
+        
+        # 应用Transformer编码器
+        output = self.transformer_encoder(inp, 
+                                        mask=attn_mask,
+                                        src_key_padding_mask=~padding_masks)
         output = self.act(output)
-        output = output.permute(1, 0, 2)
+        output = output.permute(1, 0, 2)  # (batch_size, seq_length, d_model)
         output = self.dropout1(output)
         
         # 应用掩码并扁平化
-        output = output * padding_masks.unsqueeze(-1)  # 对填充位置置零
-        output = self.output_layer(output)  # 扁平化
+        masked_output = output * padding_masks.unsqueeze(-1)  # 将填充位置置零
+        flattened = masked_output.reshape(masked_output.shape[0], -1)  # (batch_size, seq_length * d_model)
         
-        return output
+        return flattened
 
 
 class DualTSTransformerEncoderClassifier(nn.Module):
+    """
+    双分支Transformer编码器分类器，结合轨迹和特征两个分支的信息。
+    """
     def __init__(self, trajectory_branch_hyperparams, feature_branch_hyperparams, num_classes, dropout=0.1,
                  activation='gelu'):
         super(DualTSTransformerEncoderClassifier, self).__init__()
@@ -453,94 +749,87 @@ class DualTSTransformerEncoderClassifier(nn.Module):
         self.trajectory_max_len = trajectory_branch_hyperparams.get('max_len')
         self.feature_max_len = feature_branch_hyperparams.get('max_len')
         
-        # 创建分支模型，使用专门为双分支设计的TSTransformerEncoder
+        # 创建分支模型，使用专门为双分支设计的TSTransformerEncoderForDualBranch
         self.trajectory_branch = TSTransformerEncoderForDualBranch(**trajectory_branch_hyperparams)
         self.feature_branch = TSTransformerEncoderForDualBranch(**feature_branch_hyperparams)
-
+        
         # 保存d_model，用于维度调整
         self.trajectory_d_model = self.trajectory_branch.d_model
         self.feature_d_model = self.feature_branch.d_model
         
-        # 轨迹分支特征提取器 - 与单分支保持一致
-        self.encoder1_output_layer = self.build_feature_extractor(self.trajectory_d_model)
+        # 计算合并后的特征维度
+        total_channels = self.trajectory_d_model + self.feature_d_model
         
-        # 特征分支特征提取器 - 与单分支保持一致
-        self.encoder2_output_layer = self.build_feature_extractor(self.feature_d_model)
-
-        # 分类头 - 注意输入维度的变化
-        combined_feat_size = (self.trajectory_d_model * 2) + (self.feature_d_model * 2)  # 两个分支的拼接特征
-        self.output_layer = nn.Sequential(
-            nn.Linear(combined_feat_size, combined_feat_size // 2),
-            nn.BatchNorm1d(combined_feat_size // 2),
+        # 卷积融合网络
+        self.conv_layers = nn.Sequential(
+            nn.Conv1d(in_channels=total_channels, out_channels=128, kernel_size=3, padding=1),
+            nn.BatchNorm1d(128),
             nn.GELU(),
-            nn.Dropout(0.25),
-            nn.Linear(combined_feat_size // 2, num_classes)
+            nn.Dropout(dropout),
+            nn.Conv1d(in_channels=128, out_channels=64, kernel_size=3, padding=1),
+            nn.BatchNorm1d(64),
+            nn.GELU(),
+            nn.MaxPool1d(kernel_size=2, stride=2)
         )
-
+        
+        # 全局池化层
+        self.global_avg_pool = nn.AdaptiveAvgPool1d(1)
+        self.global_max_pool = nn.AdaptiveMaxPool1d(1)
+        
+        # 分类层
+        fc_input_dim = 64 * 2  # 全局平均池化 + 全局最大池化
+        self.classifier = nn.Sequential(
+            nn.Linear(fc_input_dim, 128),
+            nn.BatchNorm1d(128),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, num_classes)
+        )
+        
         self.act = _get_activation_fn(activation)
         self.dropout1 = nn.Dropout(dropout)
 
-    def build_feature_extractor(self, d_model):
-        """构建与单分支一致的特征提取器"""
-        return nn.Sequential(
-            # 特征提取层 - 保持特征维度不变
-            nn.Conv1d(d_model, d_model, kernel_size=3, padding=1),
-            nn.BatchNorm1d(d_model),
-            nn.GELU(),
-            nn.Conv1d(d_model, d_model, kernel_size=3, padding=1),
-            nn.BatchNorm1d(d_model),
-            nn.GELU()
-            # 注意这里不包含池化操作，池化在forward中进行以便获取两种池化结果
-        )
-        
     def forward(self, X1, padding_mask1, X2, padding_mask2):
-        """双分支转换器分类器的前向传播
+        """
+        双分支转换器分类器的前向传播
         
         Args:
-            X1: 轨迹分支输入，形状 (batch_size, seq_length, feat_dim)
+            X1: 轨迹分支输入，形状 (batch_size, seq_length, feat_dim) 或 (batch_size, seq_length, feat_dim*2)
             padding_mask1: 轨迹分支填充掩码，形状 (batch_size, seq_length)
-            X2: 特征分支输入，形状 (batch_size, seq_length, feat_dim)
+            X2: 特征分支输入，形状 (batch_size, seq_length, feat_dim) 或 (batch_size, seq_length, feat_dim*2)
             padding_mask2: 特征分支填充掩码，形状 (batch_size, seq_length)
             
         Returns:
             output: 分类结果，形状 (batch_size, num_classes)
         """
-        # 轨迹分支 - 获取扁平化特征
-        output1 = self.trajectory_branch(X1, padding_mask1)  # (batch_size, seq_length * d_model)
+        batch_size = X1.size(0)
         
-        # 调整维度为卷积1D格式
-        batch_size = output1.size(0)
-        output1 = output1.view(batch_size, self.trajectory_max_len, self.trajectory_d_model)
-        output1 = output1.transpose(1, 2)  # (batch_size, d_model, seq_length)
+        # 获取两个分支的特征表示
+        trajectory_output = self.trajectory_branch(X1, padding_mask1)  # (batch_size, seq_len*d_model)
+        feature_output = self.feature_branch(X2, padding_mask2)  # (batch_size, seq_len*d_model)
         
-        # 应用特征提取
-        output1 = self.encoder1_output_layer(output1)
+        # 重塑特征为三维张量，用于后续处理
+        trajectory_output = trajectory_output.view(batch_size, self.trajectory_max_len, self.trajectory_d_model)
+        feature_output = feature_output.view(batch_size, self.feature_max_len, self.feature_d_model)
         
-        # 应用双池化策略 - 与单分支一致
-        avg_pool1 = torch.mean(output1, dim=2)  # 全局平均池化
-        max_pool1, _ = torch.max(output1, dim=2)  # 全局最大池化
-        output1 = torch.cat([avg_pool1, max_pool1], dim=1)  # (batch_size, d_model*2)
+        # 在特征维度上拼接
+        combined_output = torch.cat([trajectory_output, feature_output], dim=2)
         
-        # 特征分支 - 获取扁平化特征
-        output2 = self.feature_branch(X2, padding_mask2)  # (batch_size, seq_length * d_model)
+        # 转换维度用于卷积操作
+        combined_output = combined_output.permute(0, 2, 1)  # (batch_size, channels, seq_len)
         
-        # 调整维度为卷积1D格式
-        output2 = output2.view(batch_size, self.feature_max_len, self.feature_d_model)
-        output2 = output2.transpose(1, 2)  # (batch_size, d_model, seq_length)
+        # 应用卷积层
+        conv_output = self.conv_layers(combined_output)  # (batch_size, 64, seq_len/2)
         
-        # 应用特征提取
-        output2 = self.encoder2_output_layer(output2)
+        # 应用全局池化
+        avg_pooled = self.global_avg_pool(conv_output).squeeze(-1)  # (batch_size, 64)
+        max_pooled = self.global_max_pool(conv_output).squeeze(-1)  # (batch_size, 64)
         
-        # 应用双池化策略 - 与单分支一致
-        avg_pool2 = torch.mean(output2, dim=2)  # 全局平均池化
-        max_pool2, _ = torch.max(output2, dim=2)  # 全局最大池化
-        output2 = torch.cat([avg_pool2, max_pool2], dim=1)  # (batch_size, d_model*2)
-        
-        # 融合两个分支的特征
-        output = torch.cat([output1, output2], dim=1)  # (batch_size, d_model1*2 + d_model2*2)
+        # 融合池化结果
+        pooled_features = torch.cat([avg_pooled, max_pooled], dim=1)  # (batch_size, 128)
         
         # 分类
-        output = self.output_layer(output)
+        output = self.classifier(pooled_features)  # (batch_size, num_classes)
         
         return output
 
