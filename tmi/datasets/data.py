@@ -132,10 +132,18 @@ class FeatureData(object):
                             (self.clean_feature_df, 'standardization')]
 
     def load(self):
-        noise_df_path = f"./data/{self.config['data_name']}_features/{self.data_split}/{self.config['data_name']}_{self.__class__.__name__}_noise_df.pkl"
-        clean_df_path = f"./data/{self.config['data_name']}_features/{self.data_split}/{self.config['data_name']}_{self.__class__.__name__}_clean_df.pkl"
-        labels_df_path = f"./data/{self.config['data_name']}_features/{self.data_split}/{self.config['data_name']}_{self.__class__.__name__}_labels_df.pkl"
-        masks_df_path = f"./data/{self.config['data_name']}_features/{self.data_split}/{self.config['data_name']}_{self.__class__.__name__}_masks_df.pkl"
+        sim_noise_type = self.config.get('sim_noise_type')
+        if sim_noise_type:
+            base_dir = f"./data/{self.config['data_name']}_features_sim_noise/{self.data_split}/{sim_noise_type}"
+        else:
+            base_dir = f"./data/{self.config['data_name']}_features/{self.data_split}"
+
+        logger.info(f'base_dir: {base_dir}')
+
+        noise_df_path = os.path.join(base_dir, f"{self.config['data_name']}_{self.__class__.__name__}_noise_df.pkl")
+        clean_df_path = os.path.join(base_dir, f"{self.config['data_name']}_{self.__class__.__name__}_clean_df.pkl")
+        labels_df_path = os.path.join(base_dir, f"{self.config['data_name']}_{self.__class__.__name__}_labels_df.pkl")
+        masks_df_path = os.path.join(base_dir, f"{self.config['data_name']}_{self.__class__.__name__}_masks_df.pkl")
 
         if os.path.exists(noise_df_path) and \
                 os.path.exists(clean_df_path) and \
@@ -149,12 +157,12 @@ class FeatureData(object):
             lengths = noise_df.groupby(noise_df.index).count()[0].values
             self.max_seq_len = int(np.max(lengths))
         else:
-            noise_multi_feature_segs_np = np.load(f'./data/{self.data_name}_features/{self.data_split}/noise_multi_feature_segs.npy',
+            noise_multi_feature_segs_np = np.load(os.path.join(base_dir, 'noise_multi_feature_segs.npy'),
                                                   allow_pickle=True)
             noise_multi_feature_seg_labels_np = np.load(
-                f'./data/{self.data_name}_features/{self.data_split}/noise_multi_feature_seg_labels.npy')
+                os.path.join(base_dir, 'noise_multi_feature_seg_labels.npy'))
             noise_multi_feature_segs = pd.DataFrame(noise_multi_feature_segs_np)
-            fs_seg_masks_np = np.load(f'./data/{self.data_name}_features/{self.data_split}/fs_seg_masks.npy', allow_pickle=True)
+            fs_seg_masks_np = np.load(os.path.join(base_dir, 'fs_seg_masks.npy'), allow_pickle=True)
 
             # deprecated
             # fs_seg_masks_np = np.array(
@@ -164,7 +172,7 @@ class FeatureData(object):
             # ---------- * note noise_multi_feature_seg_labels and
             # clean_multi_feature_seg_labels are same, either will be ok
             labels_df = pd.DataFrame(noise_multi_feature_seg_labels_np)
-            clean_multi_feature_segs_np = np.load(f'./data/{self.data_name}_features/{self.data_split}/clean_multi_feature_segs.npy',
+            clean_multi_feature_segs_np = np.load(os.path.join(base_dir, 'clean_multi_feature_segs.npy'),
                                                   allow_pickle=True)
             clean_multi_feature_segs = pd.DataFrame(clean_multi_feature_segs_np)
 
@@ -245,10 +253,18 @@ class TrajectoryData(object):
                             (self.clean_feature_df, 'standardization')]
 
     def load(self):
-        noise_df_path = f"./data/{self.config['data_name']}_features/{self.data_split}/{self.config['data_name']}_{self.__class__.__name__}_noise_df.pkl"
-        clean_df_path = f"./data/{self.config['data_name']}_features/{self.data_split}/{self.config['data_name']}_{self.__class__.__name__}_clean_df.pkl"
-        masks_df_path = f"./data/{self.config['data_name']}_features/{self.data_split}/{self.config['data_name']}_{self.__class__.__name__}_masks_df.pkl"
-        labels_df_path = f"./data/{self.config['data_name']}_features/{self.data_split}/{self.config['data_name']}_{self.__class__.__name__}_labels_df.pkl"
+        sim_noise_type = self.config.get('sim_noise_type')
+        if sim_noise_type:
+            base_dir = f"./data/{self.config['data_name']}_features_sim_noise/{self.data_split}/{sim_noise_type}"
+        else:
+            base_dir = f"./data/{self.config['data_name']}_features/{self.data_split}"
+
+        logger.info(f'base_dir: {base_dir}')
+
+        noise_df_path = os.path.join(base_dir, f"{self.config['data_name']}_{self.__class__.__name__}_noise_df.pkl")
+        clean_df_path = os.path.join(base_dir, f"{self.config['data_name']}_{self.__class__.__name__}_clean_df.pkl")
+        masks_df_path = os.path.join(base_dir, f"{self.config['data_name']}_{self.__class__.__name__}_masks_df.pkl")
+        labels_df_path = os.path.join(base_dir, f"{self.config['data_name']}_{self.__class__.__name__}_labels_df.pkl")
         if os.path.exists(noise_df_path) and \
                 os.path.exists(clean_df_path) and \
                 os.path.exists(masks_df_path) and \
@@ -261,9 +277,9 @@ class TrajectoryData(object):
             lengths = noise_df.groupby(noise_df.index).agg(lambda x: x.nunique())[0].values
             self.max_seq_len = int(np.max(lengths))
         else:
-            noise_trj_segs_np = np.load(f'./data/{self.data_name}_features/{self.data_split}/noise_trj_segs.npy', allow_pickle=True)
-            clean_trj_segs_np = np.load(f'./data/{self.data_name}_features/{self.data_split}/clean_trj_segs.npy', allow_pickle=True)
-            trj_seg_masks_np = np.load(f'./data/{self.data_name}_features/{self.data_split}/trj_seg_masks.npy', allow_pickle=True)
+            noise_trj_segs_np = np.load(os.path.join(base_dir, 'noise_trj_segs.npy'), allow_pickle=True)
+            clean_trj_segs_np = np.load(os.path.join(base_dir, 'clean_trj_segs.npy'), allow_pickle=True)
+            trj_seg_masks_np = np.load(os.path.join(base_dir, 'trj_seg_masks.npy'), allow_pickle=True)
 
             # duplicate for lon and lat, note it is used for the condition of
             # `generate a mask seg by considering lat and lon SIMULTANEOUSLY`
@@ -274,8 +290,7 @@ class TrajectoryData(object):
             trj_seg_masks = pd.DataFrame(trj_seg_masks_np)
             # ----------* load label for WeightedRandomSampler in main.py, note noise_multi_feature_seg_labels and
             # clean_multi_feature_seg_labels are same, either will be ok
-            noise_multi_feature_seg_labels_np = np.load(
-                f'./data/{self.data_name}_features/{self.data_split}/noise_multi_feature_seg_labels.npy')
+            noise_multi_feature_seg_labels_np = np.load(os.path.join(base_dir, 'noise_multi_feature_seg_labels.npy'))
             labels_df = pd.DataFrame(noise_multi_feature_seg_labels_np)
 
             lengths = noise_trj_segs.applymap(lambda x: len(x)).values

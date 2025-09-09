@@ -82,6 +82,7 @@ class TrainingPipeline:
         self.optimizer = None
         self.loss_module = None
         self.tensorboard_writer = None
+        self.feature_normalizers = None
 
     def _setup_device(self):
         """设置计算设备"""
@@ -163,13 +164,29 @@ class TrainingPipeline:
                 }, f, indent=4)
     
     def _preprocess_features(self):
+         # 为每个特征分支保存一个与训练集统计量绑定的 Normalizer
+         self.feature_normalizers = []
          for (train_df, train_normalization), (test_df, test_normalization) in zip(
                 self.train_data.feature_dfs, self.test_data.feature_dfs):
             normalizer = Normalizer(train_normalization)
+            # 先在训练集上拟合并变换（写回训练与验证分片）
             train_df.loc[self.train_indices] = normalizer.normalize(train_df.loc[self.train_indices])
             if len(self.val_indices):
                 train_df.loc[self.val_indices] = normalizer.normalize(train_df.loc[self.val_indices])
+            # 用相同统计量变换当前测试集
             test_df.loc[self.test_indices] = normalizer.normalize(test_df.loc[self.test_indices])
+            # 保存该分支的 normalizer（已携带训练统计量）
+            self.feature_normalizers.append(normalizer)
+
+
+    def _normalize_external_test_data(self, external_test_data):
+        """使用训练阶段保存的 normalizer 对新测试数据进行标准化（不重新拟合）。"""
+        assert self.feature_normalizers is not None, "feature_normalizers 未初始化，请先调用 setup_data()"
+        for normalizer, (ext_test_df, ext_test_normalization) in zip(
+                self.feature_normalizers, external_test_data.feature_dfs):
+            ext_test_df.loc[external_test_data.all_IDs] = normalizer.normalize(
+                ext_test_df.loc[external_test_data.all_IDs]
+            )
 
 
     def setup_dl_model(self):
@@ -280,6 +297,12 @@ class TrainingPipeline:
                     self.config['lr_factor']
                 )
         
+        # 检查是否为TrajRL模型，需要切换到分类模式
+        from tmi.models.models import TrajRLModel
+        if isinstance(self.model, TrajRLModel) and 'classification' in self.config['task']:
+            logger.info("检测到TrajRL模型，切换到分类模式")
+            self.model.set_pretrain_mode(False)
+        
         # 将模型移至目标设备
         self.model.to(self.device)
         
@@ -363,8 +386,108 @@ class TrainingPipeline:
     def evaluate_dl_test(self):
         """评估深度学习模型在测试集上的性能"""
         
+        # 检查是否需要遍历模拟噪声进行测试
+        if self.config.get('sim_noise_sweep', False):
+            # 定义要测试的模拟噪声类型和档位
+            sim_noise_configs = [
+                'drift_0_percent', 'drift_10_percent', 'drift_20_percent', 'drift_30_percent',
+                'missing_0_percent', 'missing_10_percent', 'missing_20_percent', 'missing_30_percent',
+                'outlier_0_percent', 'outlier_10_percent', 'outlier_20_percent', 'outlier_30_percent',
+                'mixed_0_percent', 'mixed_10_percent', 'mixed_20_percent', 'mixed_30_percent'
+            ]
+            
+            # 创建结果汇总表
+            all_results = {
+                'sim_noise_type': [],
+                'accuracy': [],
+                'precision': [],
+                'recall': [],
+                'f1_score': []
+            }
+            
+            # 对每种模拟噪声进行测试
+            for sim_noise_type in sim_noise_configs:
+                logger.info(f"测试模拟噪声类型: {sim_noise_type}")
+                
+                # 设置模拟噪声类型
+                self.config['sim_noise_type'] = sim_noise_type
+                
+                # 重新加载测试数据
+                data_class = data_factory[self.config['data_class']]
+                sim_test_data = data_class(limit_size=self.config['limit_size'], config=self.config, data_split='test')
+                # 使用训练集归一化参数对新测试集进行标准化
+                self._normalize_external_test_data(sim_test_data)
+                
+                # 创建新的测试数据加载器
+                test_dataset = self.dataset_class(sim_test_data, sim_test_data.all_IDs)
+                sim_test_loader = DataLoader(
+                    dataset=test_dataset,
+                    batch_size=self.config['batch_size'],
+                    shuffle=False,
+                    num_workers=self.config['num_workers'],
+                    pin_memory=True,
+                    collate_fn=lambda x: self.collate_fn(x, )
+                )
+                
+                # 运行测试
+                test_evaluator = self.runner_class(
+                    self.model, 
+                    sim_test_loader, 
+                    self.device, 
+                    self.loss_module,
+                    exp_config=self.config
+                )
+                
+                dfs_results = test_evaluator.evaluate(keep_all=True, return_dfs=True)
+                
+                # 保存此模拟噪声类型的分类结果
+                sim_output_dir = os.path.join(self.config['output_dir'], f"sim_noise_{sim_noise_type}")
+                os.makedirs(sim_output_dir, exist_ok=True)
+                utils.save_classification_results_to_excel(dfs_results, sim_output_dir)
+                
+                # 从分类报告DataFrame中提取指标
+                if 'classification_report_df' in dfs_results:
+                    # 获取最后一行(avg / total)的指标
+                    metrics_row = dfs_results['classification_report_df'].iloc[-1]
+                    
+                    # 将结果添加到汇总表
+                    all_results['sim_noise_type'].append(sim_noise_type)
+                    all_results['accuracy'].append(metrics_row.get('accuracy', float('nan')))
+                    all_results['precision'].append(metrics_row.get('precision', float('nan')))
+                    all_results['recall'].append(metrics_row.get('recall', float('nan')))
+                    all_results['f1_score'].append(metrics_row.get('f1-score', float('nan')))
+                    
+                    # 为记录创建基于metrics_row的字典
+                    metrics_dict = {
+                        'accuracy': metrics_row.get('accuracy', float('nan')),
+                        'precision': metrics_row.get('precision', float('nan')),
+                        'recall': metrics_row.get('recall', float('nan')),
+                        'f1_score': metrics_row.get('f1-score', float('nan'))
+                    }
+                    
+                    # 将此模拟噪声类型的结果保存到records文件
+                    utils.register_record(
+                        self.config,
+                        self.config['records_file'],
+                        self.config['initial_timestamp'],
+                        f"{self.config['experiment_name']}_{sim_noise_type}",
+                        metrics_dict,
+                        metrics_dict
+                    )
+                else:
+                    logger.warning(f"在模拟噪声类型 {sim_noise_type} 的结果中未找到classification_report_df")
+            
+            # 清除模拟噪声类型设置
+            self.config['sim_noise_type'] = None
+            
+            # 将所有模拟噪声类型的结果保存到一个Excel文件
+            df = pd.DataFrame(all_results)
+            summary_path = os.path.join(self.config['output_dir'], 'sim_noise_sweep_results.xlsx')
+            df.to_excel(summary_path, index=False)
+            logger.info(f"不同模拟噪声类型的汇总结果已保存到: {summary_path}")
+            
         # 检查是否需要遍历多个noise level进行测试
-        if self.config.get('noise_level_sweep', False):
+        elif self.config.get('noise_level_sweep', False):
             # 定义要测试的noise level列表
             noise_levels = ['0%noise', '10%noise', '20%noise', '30%noise', '40%noise', 
                            '50%noise', '60%noise', '70%noise', '80%noise', '90%noise', '100%noise']
@@ -740,8 +863,121 @@ class TrainingPipeline:
         """评估机器学习模型在测试集上的性能"""
         logger.info("准备机器学习测试数据...")
         
+        # 检查是否需要遍历模拟噪声进行测试
+        if self.config.get('sim_noise_sweep', False):
+            # 定义要测试的模拟噪声类型和档位
+            sim_noise_configs = [
+                'drift_0_percent', 'drift_10_percent', 'drift_20_percent', 'drift_30_percent',
+                'missing_0_percent', 'missing_10_percent', 'missing_20_percent', 'missing_30_percent',
+                'outlier_0_percent', 'outlier_10_percent', 'outlier_20_percent', 'outlier_30_percent',
+                'mixed_0_percent', 'mixed_10_percent', 'mixed_20_percent', 'mixed_30_percent'
+            ]
+            
+            # 创建结果汇总表
+            all_results = {
+                'sim_noise_type': [],
+                'model': [],
+                'accuracy': [],
+                'precision': [],
+                'recall': [],
+                'f1_score': []
+            }
+            
+            # 对每种模拟噪声进行测试
+            for sim_noise_type in sim_noise_configs:
+                logger.info(f"测试模拟噪声类型: {sim_noise_type}")
+                
+                # 设置模拟噪声类型
+                self.config['sim_noise_type'] = sim_noise_type
+                
+                # 重新加载测试数据
+                data_class = data_factory[self.config['data_class']]
+                sim_test_data = data_class(limit_size=self.config['limit_size'], config=self.config, data_split='test')
+                # 使用训练集归一化参数对新测试集进行标准化
+                self._normalize_external_test_data(sim_test_data)
+                
+                # 创建新的测试数据加载器
+                test_dataset = self.dataset_class(sim_test_data, sim_test_data.all_IDs)
+                sim_test_loader = DataLoader(
+                    dataset=test_dataset,
+                    batch_size=self.config['batch_size'],
+                    shuffle=False,
+                    num_workers=self.config['num_workers'],
+                    pin_memory=True,
+                    collate_fn=lambda x: self.collate_fn(x, )
+                )
+                
+                # 准备测试数据
+                X_test, y_test = self._prepare_ml_data(sim_test_loader)
+                
+                # 计算手工特征
+                x_handcrafted_test = self.ml_classifier.calc_handcrafted_features(X_test)
+                
+                # 创建模拟噪声类型的输出目录
+                sim_output_dir = os.path.join(self.config['output_dir'], f"sim_noise_{sim_noise_type}")
+                os.makedirs(sim_output_dir, exist_ok=True)
+                
+                # 保存当前输出目录
+                original_output_dir = self.ml_classifier.output_dir
+                self.ml_classifier.output_dir = sim_output_dir
+                
+                # 评估模型
+                logger.info(f"在模拟噪声类型 {sim_noise_type} 上评估机器学习模型...")
+                test_results = self.ml_classifier.evaluate_ml_models(
+                    x_handcrafted_test, 
+                    y_test
+                )
+                
+                # 恢复原始输出目录
+                self.ml_classifier.output_dir = original_output_dir
+                
+                # 从结果中提取指标并添加到汇总表
+                for model_name, result in test_results.items():
+                    if 'classification_report_df' in result:
+                        # 获取最后一行(avg / total)的指标
+                        metrics_row = result['classification_report_df'].iloc[-1]
+                        
+                        # 将结果添加到汇总表
+                        all_results['sim_noise_type'].append(sim_noise_type)
+                        all_results['model'].append(model_name)
+                        all_results['accuracy'].append(metrics_row.get('accuracy', float('nan')))
+                        all_results['precision'].append(metrics_row.get('precision', float('nan')))
+                        all_results['recall'].append(metrics_row.get('recall', float('nan')))
+                        all_results['f1_score'].append(metrics_row.get('f1-score', float('nan')))
+                        
+                        # 为记录创建基于metrics_row的字典
+                        metrics_dict = {
+                            'accuracy': metrics_row.get('accuracy', float('nan')),
+                            'precision': metrics_row.get('precision', float('nan')),
+                            'recall': metrics_row.get('recall', float('nan')),
+                            'f1_score': metrics_row.get('f1-score', float('nan'))
+                        }
+                        
+                        # 将此模拟噪声类型的结果保存到records文件
+                        utils.register_record(
+                            self.config,
+                            self.config['records_file'],
+                            self.config['initial_timestamp'],
+                            f"{self.config['experiment_name']}_{model_name}_{sim_noise_type}",
+                            metrics_dict,
+                            metrics_dict
+                        )
+                    else:
+                        logger.warning(f"在 {model_name} 的模拟噪声类型 {sim_noise_type} 结果中未找到classification_report_df")
+            
+            # 清除模拟噪声类型设置
+            self.config['sim_noise_type'] = None
+            
+            # 将所有模拟噪声类型的结果保存到一个Excel文件
+            df = pd.DataFrame(all_results)
+            summary_path = os.path.join(self.config['output_dir'], 'ml_sim_noise_sweep_results.xlsx')
+            df.to_excel(summary_path, index=False)
+            logger.info(f"不同模拟噪声类型的机器学习模型汇总结果已保存到: {summary_path}")
+            
+            return df
+        
         # 检查是否需要遍历多个noise level进行测试
-        if self.config.get('noise_level_sweep', False):
+        elif self.config.get('noise_level_sweep', False):
             # 定义要测试的noise level列表
             noise_levels = ['0%noise', '10%noise', '20%noise', '30%noise', '40%noise', 
                            '50%noise', '60%noise', '70%noise', '80%noise', '90%noise', '100%noise']

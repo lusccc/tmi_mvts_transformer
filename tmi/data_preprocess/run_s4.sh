@@ -1,4 +1,4 @@
-dataset='geolife'
+dataset='SHL'
 
 rm -rf ../../data/${dataset}_features/train/
 rm -rf ../../data/${dataset}_features/test/

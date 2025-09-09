@@ -123,6 +123,7 @@ class Options(object):
                                  help='Normalization layer to be used internally in transformer encoder')
         self.parser.add_argument('--trajectory_branch_hyperparams', type=str, default=None)
         self.parser.add_argument('--feature_branch_hyperparams', type=str, default=None)
+        self.parser.add_argument('--trajrl_hyperparams', type=str, default=None)
         self.parser.add_argument('--load_trajectory_branch', type=str, default=None)
         self.parser.add_argument('--load_feature_branch', type=str, default=None)
         self.parser.add_argument('--input_type', default='50%noise')
@@ -137,6 +138,8 @@ class Options(object):
                                   help='逗号分隔的类别名称列表，按索引顺序对应标签值')
         self.parser.add_argument('--noise_level_sweep', action='store_true',
                                  help='在测试模式下遍历多个噪声级别(0%-100%)进行评估，并汇总结果')
+        self.parser.add_argument('--sim_noise_sweep', action='store_true',
+                                 help='在测试模式下遍历不同类型和档位的模拟噪声进行评估，并汇总结果')
 
     def parse(self):
 

@@ -21,3 +21,5 @@ geopy~=2.4.1
 imblearn~=0.0
 imbalanced-learn~=0.12.4
 statsmodels~=0.14.1
+openpyxl
+tensorboard~=2.14.0

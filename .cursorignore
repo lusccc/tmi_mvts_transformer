@@ -10,3 +10,4 @@ train_res*/
 seq128_res/
 seq200_res/
 test_res*/
+*.pdf

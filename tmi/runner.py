@@ -41,13 +41,15 @@ def pipeline_factory(config):
         return ImputationDataset, collate_imputation_unsuperv, UnsupervisedRunner
     if task == "denoising_imputation_pretrain":
         return DenoisingImputationDataset, collate_imputation_unsuperv, UnsupervisedRunner
+    if task == "trajrl_pretrain":
+        return DenoisingImputationDataset, collate_imputation_unsuperv, UnsupervisedRunner
     if task in ['dual_branch_classification', 'dual_branch_classification_from_scratch']:
         return DualBranchClassificationDataset, collate_dual_branch_superv, SupervisedRunner
     if task in ['feature_branch_classification', 'feature_branch_classification_from_scratch',
                 'trajectory_branch_classification',
                 'trajectory_branch_classification_from_scratch', ]:
         return GenericClassificationDataset, collate_generic_superv, SupervisedRunner
-    if "cnn_classification" in task or "lstm_classification" in task:
+    if any(x in task for x in ['cnn_classification', 'lstm_classification', 'trajrl_classification', 'dmn_classification']):
         return GenericClassificationDataset, collate_generic_superv, SupervisedRunner
     if task == 'ml_classification':
         return GenericClassificationDataset, collate_generic_superv, SupervisedRunner
@@ -226,7 +228,13 @@ class UnsupervisedRunner(BaseRunner):
                                      None if self.disable_mask else target_masks)  # (batch_size, padded_length, feat_dim)
 
             # 将padding_masks传递给损失函数，以便DenoisingImputationLoss可以正确处理
-            loss = self.loss_module(predictions, targets, target_masks, padding_masks)
+            # 对于TrajRL预训练，还需要传递模型实例以支持对比学习
+            if hasattr(self.loss_module, '_compute_contrastive_loss'):
+                # TrajRL预训练损失需要模型实例
+                loss = self.loss_module(predictions, targets, target_masks, padding_masks, model=self.model)
+            else:
+                # 其他损失函数的标准调用
+                loss = self.loss_module(predictions, targets, target_masks, padding_masks)
             
             batch_loss = torch.sum(loss)
             mean_loss = batch_loss / len(loss)  # mean loss (over active elements) used for optimization
@@ -304,7 +312,13 @@ class UnsupervisedRunner(BaseRunner):
             predictions = self.model(X.to(self.device), padding_masks, target_masks)  # (batch_size, padded_length, feat_dim)
 
             # 将padding_masks传递给损失函数，以便DenoisingImputationLoss可以正确处理
-            loss = self.loss_module(predictions, targets, target_masks, padding_masks)
+            # 对于TrajRL预训练，还需要传递模型实例以支持对比学习
+            if hasattr(self.loss_module, '_compute_contrastive_loss'):
+                # TrajRL预训练损失需要模型实例
+                loss = self.loss_module(predictions, targets, target_masks, padding_masks, model=self.model)
+            else:
+                # 其他损失函数的标准调用
+                loss = self.loss_module(predictions, targets, target_masks, padding_masks)
             
             batch_loss = torch.sum(loss).cpu().item()
             mean_loss = batch_loss / len(loss)  # mean loss (over active elements) used for optimization the batch

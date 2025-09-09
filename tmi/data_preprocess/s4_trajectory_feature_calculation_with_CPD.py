@@ -48,7 +48,7 @@ LIKELY_TURN_ANGLE_THRESHOLD = 90  # degree
 MIN_MASK_SEG_LEN = 1  #  TODO 
 
 
-def filter_error_gps_data(trjs, labels):
+def filter_error_gps_data(trjs, labels, pool, n_threads):
     logger.info('filter_error_gps_data...')
     tasks = []
     batch_size = int(len(trjs) / n_threads + 1)
@@ -125,7 +125,7 @@ def do_filter_error_gps_data(trjs, labels):
     return np.array(filtered_trjs, dtype=object), np.array(filter_labels)
 
 
-def segment_on_long_stay_time(trjs, labels):
+def segment_on_long_stay_time(trjs, labels, pool, n_threads):
     logger.info('segment_trjs...')
     tasks = []
     batch_size = int(len(trjs) / n_threads + 1)
@@ -168,7 +168,7 @@ def do_segment_on_long_stay_time(trjs, labels):
     return np.array(total_trj_segs, dtype=object), np.array(total_trj_seg_labels, dtype=object)
 
 
-def calc_feature(trj_segs, trj_seg_labels):
+def calc_feature(trj_segs, trj_seg_labels, pool, n_threads, args):
     """
     noise means do not filter noise points
     """
@@ -413,7 +413,8 @@ if __name__ == '__main__':
 
     t_start = time.time()
 
-    n_threads = multiprocessing.cpu_count()
+    # n_threads = multiprocessing.cpu_count()
+    n_threads = 24
     pool = multiprocessing.Pool(processes=n_threads)
     logger.info(f'n_thread:{n_threads}')
 
@@ -444,8 +445,8 @@ if __name__ == '__main__':
     labels = labels[shuffle_idx]
 
     # preprocess
-    trjs, labels = filter_error_gps_data(trjs, labels)
-    trj_segs, trj_seg_labels = segment_on_long_stay_time(trjs, labels)
+    trjs, labels = filter_error_gps_data(trjs, labels, pool, n_threads)
+    trj_segs, trj_seg_labels = segment_on_long_stay_time(trjs, labels, pool, n_threads)
     logger.info(f'before handling imbalance data: trj_segs: {trj_segs.shape}, trj_seg_labels: {trj_seg_labels.shape}')
 
     # handle imbalance data
@@ -463,7 +464,7 @@ if __name__ == '__main__':
     multi_feature_seg_labels, \
     n_removed_points, \
     n_total_points \
-        = calc_feature(trj_segs, trj_seg_labels)
+        = calc_feature(trj_segs, trj_seg_labels, pool, n_threads, args)
     logger.info('total n_points after segment_on_stay_point: {}'.format(np.sum([len(seg) for seg in trj_segs])))
     logger.info(f'n_removed_points after calc_feature: {np.sum(n_removed_points, axis=0)}')
     logger.info(f'n_total_points after calc_feature: {np.sum(n_total_points, axis=0)}')
