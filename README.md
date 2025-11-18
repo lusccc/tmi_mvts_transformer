@@ -123,23 +123,4 @@ This path executes the pipeline defined in `tmi/ml_classification.py`, which com
 
 Early stopping and key-metric tracking (accuracy or loss) are handled in `tmi/training_tools.py` and `tmi/runner.py`.
 
----
 
----
-
-## Citation
-
-If you use this repository, please cite the published article:
-
-```
-@article{lu2026enhancing,
-  title     = {Enhancing applicable travel mode identification under real-world noise: A transformer-based framework with hybrid data and behavior-indication masks},
-  author    = {Lu, Shasha and Su, Yifan and Chai, Jing and Yu, Liang},
-  journal   = {Transportation Research Part C: Emerging Technologies},
-  volume    = {182},
-  pages     = {105388},
-  year      = {2026}
-}
-```
-
----
