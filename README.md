@@ -2,8 +2,7 @@
 
 > Lu, S., Su, Y., Chai, J., & Yu, L. (2026). *Enhancing applicable travel mode identification under real-world noise: A transformer-based framework with hybrid data and behavior-indication masks.* Transportation Research Part C: Emerging Technologies, 182, 105388.
 
-This repository accompanies the paper above. It implements a transformer-based multi-view time-series (MVTS) framework that fuses trajectory signals, motion-derived features, and behavior-indication masks to improve travel mode identification when faced with heterogeneous and noisy data sources.
-
+This repository accompanies the paper above. 
 ---
 
 ## Repository Layout
